@@ -258,6 +258,7 @@ add_op(JitOptContext *ctx, _PyUOpInstruction *this_instr,
     out->operand0 = (operand0);
     out->operand1 = this_instr->operand1;
 #ifdef Py_STATS
+    out->source_offset = this_instr->source_offset;
     out->fitness = this_instr->fitness;
 #endif
     ctx->out_buffer.next++;

@@ -35,6 +35,11 @@ typedef struct _PyThreadStateImpl {
     // Used by profiling/sampling to detect incomplete stack traces.
     _PyInterpreterFrame base_frame;
 
+#ifdef Py_STATS
+    /* Currently executing tier-two uop, for allocation profiling. */
+    const _PyUOpInstruction *current_uop;
+#endif
+
     // The reference count field is used to synchronize deallocation of the
     // thread state during runtime finalization.
     Py_ssize_t refcount;

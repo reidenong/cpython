@@ -14,6 +14,7 @@
 #include "pycore_interpframe.h"   // _PyThreadState_HasStackSpace()
 #include "pycore_object.h"        // _Py_ClearImmortal()
 #include "pycore_obmalloc.h"      // _PyMem_obmalloc_state_on_heap()
+#include "pycore_opcode_metadata.h" // _PyOpcode_OpName
 #include "pycore_opcode_utils.h"  // NUM_COMMON_CONSTANTS
 #include "pycore_optimizer.h"     // JIT_CLEANUP_THRESHOLD
 #include "pycore_parking_lot.h"   // _PyParkingLot_AfterFork()
@@ -25,6 +26,7 @@
 #include "pycore_stackref.h"      // PyStackRef_AsPyObjectBorrow()
 #include "pycore_stats.h"         // FT_STAT_WORLD_STOP_INC()
 #include "pycore_time.h"          // _PyTime_Init()
+#include "pycore_uop_metadata.h"  // _PyOpcode_uop_name
 #include "pycore_uniqueid.h"      // _PyObject_FinalizePerThreadRefcounts()
 
 
@@ -2620,6 +2622,59 @@ PyThreadState *
 PyThreadState_GetUnchecked(void)
 {
     return current_fast_get();
+}
+
+
+int
+PyUnstable_ThreadState_GetExecutionLocation(
+    PyThreadState *tstate,
+    PyUnstable_ExecutionLocation *location)
+{
+    if (tstate == NULL || location == NULL) {
+        return 0;
+    }
+    _PyInterpreterFrame *frame = _PyThreadState_GetFrame(tstate);
+    if (frame == NULL) {
+        return 0;
+    }
+
+    location->code = _PyFrame_GetCode(frame);
+    location->bytecode_offset = PyUnstable_InterpreterFrame_GetLasti(frame);
+    location->tier = 1;
+    location->operation_id = -1;
+    location->operation_name = NULL;
+
+#if defined(Py_STATS) && defined(_Py_TIER2)
+    _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+    if (tstate->current_executor != NULL) {
+        const _PyUOpInstruction *uop = tstate_impl->current_uop;
+        if (uop == NULL) {
+            return 0;
+        }
+        location->bytecode_offset = uop->source_offset;
+        location->tier = 2;
+        location->operation_id = uop->opcode;
+        if (uop->opcode <= MAX_UOP_REGS_ID) {
+            location->operation_name = _PyOpcode_uop_name[uop->opcode];
+        }
+        return location->bytecode_offset >= 0 &&
+            location->operation_name != NULL;
+    }
+#elif defined(_Py_TIER2)
+    if (tstate->current_executor != NULL) {
+        return 0;
+    }
+#endif
+
+    if (location->bytecode_offset < 0) {
+        return 0;
+    }
+    location->operation_id = _PyFrame_GetBytecode(frame)[
+        location->bytecode_offset / (int)sizeof(_Py_CODEUNIT)].op.code;
+    if (location->operation_id < 267) {
+        location->operation_name = _PyOpcode_OpName[location->operation_id];
+    }
+    return location->operation_name != NULL;
 }
 
 

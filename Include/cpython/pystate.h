@@ -262,6 +262,21 @@ struct _ts {
  * if it is NULL. */
 PyAPI_FUNC(PyThreadState *) PyThreadState_GetUnchecked(void);
 
+typedef struct {
+    /* Borrowed references and pointers, valid while the GIL is held. */
+    PyCodeObject *code;
+    const char *operation_name;
+    int bytecode_offset;
+    int tier;
+    int operation_id;
+} PyUnstable_ExecutionLocation;
+
+/* Fill location with the current Python execution location without allocating.
+ * Return 1 on success and 0 when no exact location is available. */
+PyAPI_FUNC(int) PyUnstable_ThreadState_GetExecutionLocation(
+    PyThreadState *tstate,
+    PyUnstable_ExecutionLocation *location);
+
 // Deprecated alias kept for backward compatibility
 Py_DEPRECATED(3.14) static inline PyThreadState*
 _PyThreadState_UncheckedGet(void)

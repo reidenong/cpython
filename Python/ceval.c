@@ -1415,6 +1415,9 @@ tier2_start:
 tier2_dispatch:
     for (;;) {
         uopcode = next_uop->opcode;
+#ifdef Py_STATS
+        ((_PyThreadStateImpl *)tstate)->current_uop = next_uop;
+#endif
 #ifdef Py_DEBUG
         if (frame->lltrace >= 4) {
             dump_stack(frame, stack_pointer);

@@ -579,6 +579,7 @@ add_to_trace(
     inst->oparg = oparg;
     inst->operand0 = operand;
 #ifdef Py_STATS
+    inst->source_offset = (int32_t)(target * sizeof(_Py_CODEUNIT));
     inst->execution_count = 0;
     inst->fitness = tracer->translator_state.fitness;
 #endif
@@ -654,7 +655,10 @@ compute_frame_penalty(uint16_t fitness_initial)
 static int
 is_terminator(const _PyUOpInstruction *uop)
 {
-    int opcode = _PyUop_Uncached[uop->opcode];
+    int opcode = uop->opcode;
+    if (opcode > MAX_UOP_ID) {
+        opcode = _PyUop_Uncached[opcode];
+    }
     return (
         opcode == _EXIT_TRACE ||
         opcode == _DEOPT ||
@@ -1324,6 +1328,7 @@ static void make_exit(_PyUOpInstruction *inst, int opcode, int target, bool is_c
     inst->target = target;
     inst->operand1 = is_control_flow;
 #ifdef Py_STATS
+    inst->source_offset = -1;
     inst->fitness = 0;
     inst->execution_count = 0;
 #endif
@@ -1631,6 +1636,9 @@ stack_allocate(_PyUOpInstruction *buffer, _PyUOpInstruction *output, int length)
             write->format = UOP_FORMAT_TARGET;
             write->oparg = 0;
             write->target = 0;
+#ifdef Py_STATS
+            write->source_offset = buffer[i].source_offset;
+#endif
             write++;
             depth = new_depth;
         }

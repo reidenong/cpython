@@ -481,8 +481,15 @@ do {                                                   \
     goto tier2_start;                                  \
 } while (0)
 
+#ifdef Py_STATS
+#  define CLEAR_CURRENT_UOP() (((_PyThreadStateImpl *)tstate)->current_uop = NULL)
+#else
+#  define CLEAR_CURRENT_UOP() ((void)0)
+#endif
+
 #define GOTO_TIER_ONE_SETUP \
     tstate->current_executor = NULL;                              \
+    CLEAR_CURRENT_UOP();                                          \
     OPT_HIST(trace_uop_execution_counter, trace_run_length_hist); \
     _PyFrame_SetStackPointer(frame, stack_pointer);
 

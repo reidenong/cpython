@@ -31,6 +31,8 @@ typedef struct _PyUOpInstruction{
     uint64_t operand0;  // A cache entry
     uint64_t operand1;
 #ifdef Py_STATS
+    /* Originating bytecode offset in bytes, for profiling attribution. */
+    int32_t source_offset;
     int32_t fitness;
     uint64_t execution_count;
 #endif
