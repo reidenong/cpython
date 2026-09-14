@@ -85,6 +85,11 @@ class TestOptimizerSymbols(unittest.TestCase):
     def test_optimizer_symbols(self):
         _testinternalcapi.uop_symbols_test()
 
+    @unittest.skipUnless(hasattr(_testinternalcapi, "uop_virtualization_test"),
+                "requires _testinternalcapi.uop_virtualization_test")
+    def test_optimizer_virtualization(self):
+        _testinternalcapi.uop_virtualization_test()
+
 
 if __name__ == "__main__":
     unittest.main()

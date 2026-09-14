@@ -2,6 +2,7 @@
 
 #include "ceval.h"
 #include "pycore_long.h"
+#include "pycore_uop_metadata.h"  // _PyUop_Uncached
 
 int
 Py_GetRecursionLimit(void)
@@ -1408,7 +1409,10 @@ tier2_start:
 #undef ENABLE_SPECIALIZATION
 #define ENABLE_SPECIALIZATION 0
 
-    uint16_t uopcode;
+    uint16_t uopcode = UINT16_MAX;
+#ifdef Py_DEBUG
+    int raw_virtual_float_count = 0;
+#endif
 #ifdef Py_STATS
     int lastuop = 0;
     uint64_t trace_uop_execution_counter = 0;
@@ -1419,17 +1423,55 @@ tier2_start:
         next_uop->opcode == _COLD_DYNAMIC_EXIT_r00);
 tier2_dispatch:
     for (;;) {
+#ifdef Py_DEBUG
+        if (uopcode != UINT16_MAX) {
+            int previous_opcode = _PyUop_Uncached[uopcode];
+            int previous_oparg = next_uop[-1].oparg;
+            if (previous_opcode == _BINARY_OP_ADD_FLOAT_VIRTUAL ||
+                previous_opcode == _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL ||
+                previous_opcode == _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL)
+            {
+                int raw_inputs =
+                    ((previous_oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0) +
+                    ((previous_oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0);
+                assert(raw_virtual_float_count >= raw_inputs);
+                raw_virtual_float_count += 1 - raw_inputs;
+            }
+            else if (previous_opcode == _UNARY_NEGATIVE_FLOAT_VIRTUAL) {
+                int raw_inputs =
+                    (previous_oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
+                assert(raw_virtual_float_count >= raw_inputs);
+                raw_virtual_float_count += 1 - raw_inputs;
+            }
+            else if (previous_opcode == _POP_TOP_VIRTUAL_FLOAT) {
+                assert(raw_virtual_float_count > 0);
+                raw_virtual_float_count--;
+            }
+            else if (previous_opcode == _MATERIALIZE_VIRTUAL_FLOAT) {
+                assert(raw_virtual_float_count > 0);
+                raw_virtual_float_count--;
+            }
+        }
+#endif
         uopcode = next_uop->opcode;
 #ifdef Py_DEBUG
         if (frame->lltrace >= 4) {
-            dump_stack(frame, stack_pointer);
-            printf("    cache=[");
-            dump_cache_item(_tos_cache0, 0, current_cached_values);
-            printf(", ");
-            dump_cache_item(_tos_cache1, 1, current_cached_values);
-            printf(", ");
-            dump_cache_item(_tos_cache2, 2, current_cached_values);
-            printf("]\n");
+            if (raw_virtual_float_count != 0) {
+                /* Raw double bits are not valid _PyStackRefs and cannot be
+                 * passed to the generic object-oriented debug printer. */
+                printf("    stack/cache omitted: %d raw virtual float(s) live\n",
+                       raw_virtual_float_count);
+            }
+            else {
+                dump_stack(frame, stack_pointer);
+                printf("    cache=[");
+                dump_cache_item(_tos_cache0, 0, current_cached_values);
+                printf(", ");
+                dump_cache_item(_tos_cache1, 1, current_cached_values);
+                printf(", ");
+                dump_cache_item(_tos_cache2, 2, current_cached_values);
+                printf("]\n");
+            }
             if (next_uop->opcode == _START_EXECUTOR_r00) {
                 printf("%4d uop: ", 0);
             }

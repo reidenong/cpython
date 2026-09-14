@@ -378,6 +378,26 @@ dummy_func(
             PyStackRef_CLOSE_SPECIALIZED(value, _PyFloat_ExactDealloc);
         }
 
+        tier2 op(_POP_TOP_VIRTUAL_FLOAT, (value --)) {
+            /* value contains opaque double bits, not a valid _PyStackRef.
+             * Merely consuming the C value is safe; no PyStackRef_* operation
+             * or object inspection may be added here. */
+            (void)value;
+            DEAD(value);
+        }
+
+        tier2 op(_MATERIALIZE_VIRTUAL_FLOAT, (value -- res)) {
+            /* The input contains raw double bits, not a PyObject pointer.
+             * Mark it dead before the potentially failing allocation so the
+             * error path reconstructs a stack containing only valid Python
+             * references. */
+            double dval = _PyJIT_UnpackRawDouble(value);
+            PyObject *boxed = PyFloat_FromDouble(dval);
+            DEAD(value);
+            ERROR_IF(boxed == NULL);
+            res = PyStackRef_FromPyObjectSteal(boxed);
+        }
+
         op(_POP_TOP_UNICODE, (value --)) {
             assert(PyUnicode_CheckExact(PyStackRef_AsPyObjectBorrow(value)));
             PyStackRef_CLOSE_SPECIALIZED(value, _PyUnicode_ExactDealloc);
@@ -473,6 +493,24 @@ dummy_func(
             ((PyFloatObject *)val_o)->ob_fval = dres;
             res = value;
             v = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 pure op(_UNARY_NEGATIVE_FLOAT_VIRTUAL, (value -- res, v)) {
+            bool value_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
+            double dval;
+            if (value_is_raw) {
+                dval = _PyJIT_UnpackRawDouble(value);
+            }
+            else {
+                PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
+                assert(PyFloat_CheckExact(value_o));
+                dval = ((PyFloatObject *)value_o)->ob_fval;
+            }
+            STAT_INC(UNARY_NEGATIVE, hit);
+            res = _PyJIT_PackRawDouble(-dval);
+            v = value_is_raw ? PyStackRef_NULL : value;
             INPUTS_DEAD();
         }
 
@@ -802,6 +840,37 @@ dummy_func(
             INPUTS_DEAD();
         }
 
+        tier2 pure op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
+            bool left_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
+            bool right_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
+            double left_value;
+            double right_value;
+            if (left_is_raw) {
+                left_value = _PyJIT_UnpackRawDouble(left);
+            }
+            else {
+                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+                assert(PyFloat_CheckExact(left_o));
+                left_value = ((PyFloatObject *)left_o)->ob_fval;
+            }
+            if (right_is_raw) {
+                right_value = _PyJIT_UnpackRawDouble(right);
+            }
+            else {
+                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
+                assert(PyFloat_CheckExact(right_o));
+                right_value = ((PyFloatObject *)right_o)->ob_fval;
+            }
+
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_value);
+            l = left_is_raw ? PyStackRef_NULL : left;
+            r = right_is_raw ? PyStackRef_NULL : right;
+            INPUTS_DEAD();
+        }
+
         pure op(_BINARY_OP_ADD_FLOAT, (left, right -- res, l, r)) {
             PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
             PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
@@ -822,6 +891,37 @@ dummy_func(
             INPUTS_DEAD();
         }
 
+        tier2 pure op(_BINARY_OP_ADD_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
+            bool left_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
+            bool right_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
+            double left_value;
+            double right_value;
+            if (left_is_raw) {
+                left_value = _PyJIT_UnpackRawDouble(left);
+            }
+            else {
+                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+                assert(PyFloat_CheckExact(left_o));
+                left_value = ((PyFloatObject *)left_o)->ob_fval;
+            }
+            if (right_is_raw) {
+                right_value = _PyJIT_UnpackRawDouble(right);
+            }
+            else {
+                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
+                assert(PyFloat_CheckExact(right_o));
+                right_value = ((PyFloatObject *)right_o)->ob_fval;
+            }
+
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_value);
+            l = left_is_raw ? PyStackRef_NULL : left;
+            r = right_is_raw ? PyStackRef_NULL : right;
+            INPUTS_DEAD();
+        }
+
         pure op(_BINARY_OP_SUBTRACT_FLOAT, (left, right -- res, l, r)) {
             PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
             PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
@@ -839,6 +939,37 @@ dummy_func(
             res = PyStackRef_FromPyObjectSteal(d);
             l = left;
             r = right;
+            INPUTS_DEAD();
+        }
+
+        tier2 pure op(_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
+            bool left_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
+            bool right_is_raw =
+                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
+            double left_value;
+            double right_value;
+            if (left_is_raw) {
+                left_value = _PyJIT_UnpackRawDouble(left);
+            }
+            else {
+                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+                assert(PyFloat_CheckExact(left_o));
+                left_value = ((PyFloatObject *)left_o)->ob_fval;
+            }
+            if (right_is_raw) {
+                right_value = _PyJIT_UnpackRawDouble(right);
+            }
+            else {
+                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
+                assert(PyFloat_CheckExact(right_o));
+                right_value = ((PyFloatObject *)right_o)->ob_fval;
+            }
+
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value - right_value);
+            l = left_is_raw ? PyStackRef_NULL : left;
+            r = right_is_raw ? PyStackRef_NULL : right;
             INPUTS_DEAD();
         }
 

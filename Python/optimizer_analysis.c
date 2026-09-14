@@ -24,6 +24,7 @@
 #include "pycore_uop_metadata.h"
 #include "pycore_long.h"
 #include "pycore_interpframe.h"  // _PyFrame_GetCode
+#include "pycore_jit.h"          // _Py_JIT_RAW_DOUBLE_SUPPORTED
 #include "pycore_optimizer.h"
 #include "pycore_object.h"
 #include "pycore_function.h"
@@ -43,7 +44,7 @@
 #ifdef Py_DEBUG
     extern const char *_PyUOpName(int index);
     extern void _PyUOpPrint(const _PyUOpInstruction *uop);
-    extern void _PyUOpSymPrint(JitOptRef ref);
+    extern void _PyUOpSymPrint(JitOptContext *ctx, JitOptRef ref);
     static const char *const DEBUG_ENV = "PYTHON_OPT_DEBUG";
     static inline int get_lltrace(void) {
         char *uop_debug = Py_GETENV(DEBUG_ENV);
@@ -57,14 +58,17 @@
     if (get_lltrace() >= (level)) { printf(__VA_ARGS__); }
 
 static void
-dump_abstract_stack(_Py_UOpsAbstractFrame *frame, JitOptRef *stack_pointer)
+dump_abstract_stack(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer)
 {
     printf("    locals=[");
     for (int i = 0 ; i < frame->locals_len; i++) {
         if (i > 0) {
             printf(", ");
         }
-        _PyUOpSymPrint(frame->locals[i]);
+        _PyUOpSymPrint(ctx, frame->locals[i]);
     }
     printf("]\n");
     if (stack_pointer < frame->stack) {
@@ -76,7 +80,7 @@ dump_abstract_stack(_Py_UOpsAbstractFrame *frame, JitOptRef *stack_pointer)
             if (ptr != frame->stack) {
                 printf(", ");
             }
-            _PyUOpSymPrint(*ptr);
+            _PyUOpSymPrint(ctx, *ptr);
         }
         printf("]\n");
     }
@@ -92,7 +96,7 @@ dump_uop(JitOptContext *ctx, const char *label, int index,
         _PyUOpPrint(instr);
         printf("\n");
         if (get_lltrace() >= 5 && ctx->frame->code != ((PyCodeObject *)&_Py_InitCleanup)) {
-            dump_abstract_stack(ctx->frame, stack_pointer);
+            dump_abstract_stack(ctx, ctx->frame, stack_pointer);
         }
     }
 }
@@ -434,6 +438,15 @@ lookup_attr(JitOptContext *ctx, _PyBloomFilter *dependencies, _PyUOpInstruction 
 static void
 optimize_pop_top(JitOptContext *ctx, _PyUOpInstruction *this_instr, JitOptRef value)
 {
+    if (_Py_uop_alloc_is_virtual(ctx, value)) {
+        const JitVirtualObject *virtual_object =
+            _Py_uop_alloc_resolve_virtual(ctx, value);
+        assert(virtual_object != NULL);
+        assert(virtual_object->kind == JIT_VIRTUAL_FLOAT);
+        assert(sym_get_type(value) == &PyFloat_Type);
+        ADD_OP(_POP_TOP_VIRTUAL_FLOAT, 0, 0);
+        return;
+    }
     PyTypeObject *typ = sym_get_type(value);
     if (PyJitRef_IsBorrowed(value) ||
         sym_is_immortal(PyJitRef_Unwrap(value)) ||
@@ -452,6 +465,94 @@ optimize_pop_top(JitOptContext *ctx, _PyUOpInstruction *this_instr, JitOptRef va
     else {
         ADD_OP(_POP_TOP, 0, 0);
     }
+}
+
+bool
+_Py_uop_can_virtualize_float_result(
+    JitOptContext *ctx,
+    const _PyUOpInstruction *producer,
+    int cleanup_count)
+{
+    if (!ctx->virtual_floats_enabled || ctx->input_trace_end == NULL) {
+        return false;
+    }
+
+    /* This is a deliberately small eligibility precheck, not a general escape
+     * analysis.  It accepts straight-line float expression trees whose root
+     * is immediately discarded or stored.  Stage 7 will replace this bounded
+     * grammar with general barrier handling and a clean retry mechanism.
+     *
+     * Binary float uops have two specialized cleanup pops.  Unary negative has
+     * one generic cleanup pop.  Consume those here before scanning the uses of
+     * the newly produced result. */
+    assert(cleanup_count == 1 || cleanup_count == 2);
+    const _PyUOpInstruction *cursor = producer + 1;
+    if (ctx->input_trace_end - cursor <= cleanup_count) {
+        return false;
+    }
+    for (int i = 0; i < cleanup_count; i++) {
+        int expected = cleanup_count == 2 ? _POP_TOP_FLOAT : _POP_TOP;
+        if (cursor[i].opcode != expected) {
+            return false;
+        }
+    }
+    cursor += cleanup_count;
+
+    while (cursor < ctx->input_trace_end) {
+        switch (cursor->opcode) {
+            case _NOP:
+            case _CHECK_VALIDITY:
+            case _SET_IP:
+            case _GUARD_TOS_FLOAT:
+            case _GUARD_NOS_FLOAT:
+                cursor++;
+                continue;
+            case _LOAD_FAST:
+            case _LOAD_FAST_BORROW:
+                /* A later guard for a newly loaded, not-yet-typed local could
+                 * deopt while the earlier raw result is live. */
+                if (cursor->oparg >= ctx->frame->locals_len ||
+                    !_Py_uop_sym_matches_type(
+                        ctx->frame->locals[cursor->oparg], &PyFloat_Type))
+                {
+                    return false;
+                }
+                cursor++;
+                continue;
+            case _LOAD_CONST_INLINE:
+            case _LOAD_CONST_INLINE_BORROW:
+                if (!PyFloat_CheckExact((PyObject *)cursor->operand0)) {
+                    return false;
+                }
+                cursor++;
+                continue;
+            case _POP_TOP:
+            case _SWAP_FAST:
+                return true;
+            case _BINARY_OP_ADD_FLOAT:
+            case _BINARY_OP_SUBTRACT_FLOAT:
+            case _BINARY_OP_MULTIPLY_FLOAT:
+                if (ctx->input_trace_end - cursor < 3 ||
+                    cursor[1].opcode != _POP_TOP_FLOAT ||
+                    cursor[2].opcode != _POP_TOP_FLOAT)
+                {
+                    return false;
+                }
+                cursor += 3;
+                continue;
+            case _UNARY_NEGATIVE:
+                if (ctx->input_trace_end - cursor < 2 ||
+                    cursor[1].opcode != _POP_TOP)
+                {
+                    return false;
+                }
+                cursor += 2;
+                continue;
+            default:
+                return false;
+        }
+    }
+    return false;
 }
 
 /* Look up name via super (normal case from supercheck where
@@ -597,6 +698,23 @@ optimize_uops(
                          _setup_optimizer_watchers, NULL);
 
     _Py_uop_abstractcontext_init(ctx, dependencies);
+    ctx->input_trace_end = trace + trace_len;
+    ctx->virtual_floats_enabled = _Py_JIT_RAW_DOUBLE_SUPPORTED;
+    /* Private A/B switch for the virtual-float experiment.  Reading it while
+     * compiling a trace does not affect the generated executor's hot path. */
+    char *virtual_floats = Py_GETENV("PYTHON_JIT_VIRTUAL_FLOATS");
+    if (virtual_floats != NULL && *virtual_floats == '0') {
+        ctx->virtual_floats_enabled = false;
+    }
+#ifdef Py_DEBUG
+    /* The Tier 2 interpreter's high-level trace mode treats every live slot
+     * as a Python object.  Do not put raw double bits in such an executor. */
+    if (tstate->base.current_frame != NULL &&
+        tstate->base.current_frame->lltrace >= 4)
+    {
+        ctx->virtual_floats_enabled = false;
+    }
+#endif
     _Py_UOpsAbstractFrame *frame = _Py_uop_frame_new(ctx, (PyCodeObject *)func->func_code, NULL, 0);
     if (frame == NULL) {
         return 0;
@@ -647,6 +765,8 @@ optimize_uops(
         assert(ctx->frame != NULL);
         DUMP_UOPS(ctx, "out", out_ptr, stack_pointer);
         if (!CURRENT_FRAME_IS_INIT_SHIM() && !ctx->done) {
+            assert(_Py_uop_alloc_validate_frame(
+                ctx, ctx->frame, stack_pointer));
             DPRINTF(3, " stack_level %d\n", STACK_LEVEL());
             ctx->frame->stack_pointer = stack_pointer;
             assert(STACK_LEVEL() >= 0);
@@ -667,6 +787,17 @@ optimize_uops(
         DPRINTF(1, "Hit bottom in abstract interpreter\n");
         _Py_uop_abstractcontext_fini(ctx);
         OPT_STAT_INC(optimizer_contradiction);
+        return 0;
+    }
+
+    /* The Stage 6 eligibility grammar must consume every virtual temporary at
+     * a raw-aware arithmetic uop, discard, or materialization.  Refuse to
+     * install a trace if a conservative precheck ever matched the wrong value.
+     * This is a safety net, not yet the general barrier pass planned for Stage
+     * 7. */
+    if (_Py_uop_alloc_frame_has_virtual(ctx, ctx->frame, stack_pointer)) {
+        DPRINTF(1, "virtual float remained live at the end of optimization\n");
+        _Py_uop_abstractcontext_fini(ctx);
         return 0;
     }
 

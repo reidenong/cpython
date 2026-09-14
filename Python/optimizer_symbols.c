@@ -5,9 +5,12 @@
 #include "pycore_code.h"
 #include "pycore_frame.h"
 #include "pycore_interpframe.h"
+#include "pycore_jit.h"
 #include "pycore_long.h"
+#include "pycore_opcode_metadata.h"  // HAS_PURE_FLAG
 #include "pycore_optimizer.h"
 #include "pycore_stats.h"
+#include "pycore_uop_metadata.h"  // MAX_CACHED_REGISTER
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -73,7 +76,7 @@ static inline int get_lltrace(void) {
     if (get_lltrace() >= (level)) { printf(__VA_ARGS__); }
 
 void
-_PyUOpSymPrint(JitOptRef ref)
+_PyUOpSymPrint(JitOptContext *ctx, JitOptRef ref)
 {
     if (PyJitRef_IsNull(ref)) {
         printf("<JitRef NULL>");
@@ -133,6 +136,21 @@ _PyUOpSymPrint(JitOptRef ref)
             printf("<tag=%d at %p>", tag, (void *)sym);
             break;
     }
+    JitOptAllocation allocation = _Py_uop_alloc_get(ctx, ref);
+    if (allocation.state == JIT_ALLOC_VIRTUAL) {
+        const JitVirtualObject *virtual_object =
+            _Py_uop_alloc_resolve_virtual(ctx, ref);
+        if (virtual_object != NULL &&
+            virtual_object->kind == JIT_VIRTUAL_FLOAT)
+        {
+            printf(" [virtual float #%u]",
+                   (unsigned int)allocation.virtual_ref);
+        }
+        else {
+            printf(" [invalid virtual #%u]",
+                   (unsigned int)allocation.virtual_ref);
+        }
+    }
 }
 
 #else
@@ -167,15 +185,236 @@ out_of_space_ref(JitOptContext *ctx)
 static JitOptSymbol *
 sym_new(JitOptContext *ctx)
 {
-    JitOptSymbol *self = &ctx->t_arena.arena[ctx->t_arena.ty_curr_number];
     if (ctx->t_arena.ty_curr_number >= ctx->t_arena.ty_max_number) {
         OPT_STAT_INC(optimizer_failure_reason_no_memory);
         DPRINTF(1, "out of space for symbolic expression type\n");
         return NULL;
     }
-    ctx->t_arena.ty_curr_number++;
-    self->tag = JIT_SYM_UNKNOWN_TAG;;
+    int index = ctx->t_arena.ty_curr_number++;
+    JitOptSymbol *self = &ctx->t_arena.arena[index];
+    self->tag = JIT_SYM_UNKNOWN_TAG;
+    /* Ordinary symbols are concrete unless a virtual-producing uop explicitly
+     * changes their allocation representation. */
+    ctx->allocations[index] = JIT_VIRTUAL_REF_NULL;
     return self;
+}
+
+/* Allocation representation
+ * =========================
+ *
+ * This table is deliberately independent of JitOptSymbol's type/value
+ * lattice.  Reference-ownership tags are stripped by PyJitRef_Unwrap(), so
+ * borrowed and unique forms of one symbol share a table entry.
+ */
+
+static bool
+allocation_index(JitOptContext *ctx, JitOptRef ref, int *index)
+{
+    if (PyJitRef_IsNull(ref) || PyJitRef_IsInvalid(ref)) {
+        return false;
+    }
+    uintptr_t address = (uintptr_t)PyJitRef_Unwrap(ref);
+    uintptr_t base = (uintptr_t)ctx->t_arena.arena;
+    uintptr_t end = base + (size_t)ctx->t_arena.ty_curr_number * sizeof(JitOptSymbol);
+    if (address < base || address >= end ||
+        (address - base) % sizeof(JitOptSymbol) != 0)
+    {
+        return false;
+    }
+    *index = (int)((address - base) / sizeof(JitOptSymbol));
+    return true;
+}
+
+JitOptAllocation
+_Py_uop_alloc_get(JitOptContext *ctx, JitOptRef ref)
+{
+    int index;
+    if (!allocation_index(ctx, ref, &index)) {
+        /* Invalid optimizer references cannot represent an unboxed runtime
+         * value, so read-only queries conservatively treat them as concrete. */
+        return (JitOptAllocation){
+            .state = JIT_ALLOC_CONCRETE,
+            .virtual_ref = JIT_VIRTUAL_REF_NULL,
+        };
+    }
+    JitVirtualRef virtual_ref = ctx->allocations[index];
+    return (JitOptAllocation){
+        .state = virtual_ref == JIT_VIRTUAL_REF_NULL
+            ? JIT_ALLOC_CONCRETE : JIT_ALLOC_VIRTUAL,
+        .virtual_ref = virtual_ref,
+    };
+}
+
+bool
+_Py_uop_alloc_is_virtual(JitOptContext *ctx, JitOptRef ref)
+{
+    return _Py_uop_alloc_get(ctx, ref).state == JIT_ALLOC_VIRTUAL;
+}
+
+bool
+_Py_uop_alloc_set_concrete(JitOptContext *ctx, JitOptRef ref)
+{
+    /* This changes optimizer metadata only.  Once virtual uops have been
+     * emitted, callers must materialize into a fresh symbol instead. */
+    int index;
+    if (!allocation_index(ctx, ref, &index)) {
+        return false;
+    }
+    ctx->allocations[index] = JIT_VIRTUAL_REF_NULL;
+    return true;
+}
+
+JitVirtualRef
+_Py_uop_alloc_new_virtual_float(JitOptContext *ctx, JitOptRef ref)
+{
+    int allocation;
+    if (!allocation_index(ctx, ref, &allocation) ||
+        !_Py_uop_sym_matches_type(ref, &PyFloat_Type))
+    {
+        return JIT_VIRTUAL_REF_NULL;
+    }
+    JitVirtualRef existing = ctx->allocations[allocation];
+    if (existing != JIT_VIRTUAL_REF_NULL) {
+        return existing;
+    }
+    if (ctx->virtuals.virtual_curr_number >= ctx->virtuals.virtual_max_number) {
+        OPT_STAT_INC(optimizer_failure_reason_no_memory);
+        DPRINTF(1, "out of space for virtual-object descriptors\n");
+        out_of_space(ctx);
+        return JIT_VIRTUAL_REF_NULL;
+    }
+    int virtual_index = ctx->virtuals.virtual_curr_number++;
+    ctx->virtuals.arena[virtual_index].kind = JIT_VIRTUAL_FLOAT;
+    JitVirtualRef virtual_ref = (JitVirtualRef)(virtual_index + 1);
+    ctx->allocations[allocation] = virtual_ref;
+    return virtual_ref;
+}
+
+JitOptRef
+_Py_uop_alloc_materialize_virtual_float(JitOptContext *ctx, JitOptRef ref)
+{
+    /* Materialization changes the runtime representation, so it produces a
+     * fresh concrete symbol rather than mutating the virtual symbol and any
+     * aliases which may eventually share it.  Stage 5 accepts only unique
+     * values; alias-aware, once-per-identity materialization comes later. */
+    if (!PyJitRef_IsUnique(ref)) {
+        return PyJitRef_NULL;
+    }
+    const JitVirtualObject *virtual_object =
+        _Py_uop_alloc_resolve_virtual(ctx, ref);
+    if (virtual_object == NULL ||
+        virtual_object->kind != JIT_VIRTUAL_FLOAT ||
+        !_Py_uop_sym_matches_type(ref, &PyFloat_Type))
+    {
+        return PyJitRef_NULL;
+    }
+    JitOptRef concrete = PyJitRef_MakeUnique(
+        _Py_uop_sym_new_type(ctx, &PyFloat_Type));
+    assert(!_Py_uop_alloc_is_virtual(ctx, concrete));
+    return concrete;
+}
+
+const JitVirtualObject *
+_Py_uop_alloc_resolve_virtual(JitOptContext *ctx, JitOptRef ref)
+{
+    JitOptAllocation allocation = _Py_uop_alloc_get(ctx, ref);
+    if (allocation.state != JIT_ALLOC_VIRTUAL) {
+        return NULL;
+    }
+    int index = (int)allocation.virtual_ref - 1;
+    if (index < 0 || index >= ctx->virtuals.virtual_curr_number) {
+        return NULL;
+    }
+    return &ctx->virtuals.arena[index];
+}
+
+static bool
+allocation_is_valid(JitOptContext *ctx, JitOptRef ref)
+{
+    JitOptAllocation allocation = _Py_uop_alloc_get(ctx, ref);
+    if (allocation.state == JIT_ALLOC_CONCRETE) {
+        return allocation.virtual_ref == JIT_VIRTUAL_REF_NULL;
+    }
+    const JitVirtualObject *virtual_object =
+        _Py_uop_alloc_resolve_virtual(ctx, ref);
+    return virtual_object != NULL &&
+        virtual_object->kind == JIT_VIRTUAL_FLOAT &&
+        _Py_uop_sym_matches_type(ref, &PyFloat_Type);
+}
+
+static bool
+valid_frame_range(_Py_UOpsAbstractFrame *frame, JitOptRef *stack_pointer)
+{
+    if (frame == NULL || frame->locals == NULL || frame->stack == NULL) {
+        return false;
+    }
+    return stack_pointer >= frame->stack &&
+        stack_pointer <= frame->stack + frame->stack_len + MAX_CACHED_REGISTER;
+}
+
+bool
+_Py_uop_alloc_frame_has_virtual(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer)
+{
+    if (!valid_frame_range(frame, stack_pointer)) {
+        /* A future safety barrier must not mistake malformed optimizer state
+         * for proof that every live value is concrete. */
+        return true;
+    }
+    for (int i = 0; i < frame->locals_len; i++) {
+        if (_Py_uop_alloc_is_virtual(ctx, frame->locals[i])) {
+            return true;
+        }
+    }
+    for (JitOptRef *ref = frame->stack; ref < stack_pointer; ref++) {
+        if (_Py_uop_alloc_is_virtual(ctx, *ref)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int
+_Py_uop_alloc_frame_virtual_count(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer)
+{
+    if (!valid_frame_range(frame, stack_pointer)) {
+        return -1;
+    }
+    int count = 0;
+    for (int i = 0; i < frame->locals_len; i++) {
+        count += _Py_uop_alloc_is_virtual(ctx, frame->locals[i]);
+    }
+    for (JitOptRef *ref = frame->stack; ref < stack_pointer; ref++) {
+        count += _Py_uop_alloc_is_virtual(ctx, *ref);
+    }
+    return count;
+}
+
+bool
+_Py_uop_alloc_validate_frame(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer)
+{
+    if (!valid_frame_range(frame, stack_pointer)) {
+        return false;
+    }
+    for (int i = 0; i < frame->locals_len; i++) {
+        if (!allocation_is_valid(ctx, frame->locals[i])) {
+            return false;
+        }
+    }
+    for (JitOptRef *ref = frame->stack; ref < stack_pointer; ref++) {
+        if (!allocation_is_valid(ctx, *ref)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void make_const(JitOptSymbol *sym, PyObject *val)
@@ -1476,6 +1715,8 @@ void
 _Py_uop_abstractcontext_init(JitOptContext *ctx, _PyBloomFilter *dependencies)
 {
     static_assert(sizeof(JitOptSymbol) <= 3 * sizeof(uint64_t), "JitOptSymbol has grown");
+    static_assert(VIRTUAL_ARENA_SIZE <= UINT16_MAX,
+                  "virtual-object arena does not fit in JitVirtualRef");
 
     ctx->stack.used = ctx->stack_array;
     ctx->stack.end = &ctx->stack_array[ABSTRACT_INTERP_STACK_SIZE-STACK_HEADROOM];
@@ -1493,6 +1734,10 @@ _Py_uop_abstractcontext_init(JitOptContext *ctx, _PyBloomFilter *dependencies)
     // Setup the arena for sym expressions.
     ctx->t_arena.ty_curr_number = 0;
     ctx->t_arena.ty_max_number = TY_ARENA_SIZE;
+    ctx->virtuals.virtual_curr_number = 0;
+    ctx->virtuals.virtual_max_number = VIRTUAL_ARENA_SIZE;
+    ctx->input_trace_end = NULL;
+    ctx->virtual_floats_enabled = false;
 
     // Frame setup
     ctx->curr_frame_depth = 0;
@@ -2115,6 +2360,360 @@ fail:
     Py_XDECREF(val_big);
     Py_XDECREF(tuple);
     Py_XDECREF(func);
+    return NULL;
+}
+
+PyObject *
+_Py_uop_virtualization_test(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+{
+    JitOptContext context;
+    JitOptContext *ctx = &context;
+    _Py_uop_abstractcontext_init(ctx, NULL);
+
+#if _Py_JIT_RAW_DOUBLE_SUPPORTED
+    /* memcpy-based transport must preserve the exact IEEE-754 payload.  The
+     * cases include both zero signs, infinity, and a quiet NaN payload. */
+    static const uint64_t raw_double_cases[] = {
+        UINT64_C(0x0000000000000000),
+        UINT64_C(0x8000000000000000),
+        UINT64_C(0x3ff8000000000000),
+        UINT64_C(0x7ff0000000000000),
+        UINT64_C(0x7ff8000000001234),
+    };
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(raw_double_cases); i++) {
+        uint64_t input_bits = raw_double_cases[i];
+        double input;
+        memcpy(&input, &input_bits, sizeof(input));
+
+        _PyStackRef carrier = _PyJIT_PackRawDouble(input);
+        uint64_t carrier_bits;
+        memcpy(&carrier_bits, &carrier, sizeof(carrier_bits));
+        TEST_PREDICATE(
+            carrier_bits == input_bits,
+            "packing a raw double changed its bit pattern"
+        );
+
+        double output = _PyJIT_UnpackRawDouble(carrier);
+        uint64_t output_bits;
+        memcpy(&output_bits, &output, sizeof(output_bits));
+        TEST_PREDICATE(
+            output_bits == input_bits,
+            "unpacking a raw double changed its bit pattern"
+        );
+    }
+#endif
+
+    /* Virtual binary arithmetic exposes a raw result plus two safe cleanup
+     * values.  Its representation mask is an argument, and every generated
+     * cache plan must select a form mapping back to the same base uop. */
+    static const int virtual_binary_opcodes[] = {
+        _BINARY_OP_ADD_FLOAT_VIRTUAL,
+        _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL,
+        _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL,
+    };
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(virtual_binary_opcodes); i++) {
+        int opcode = virtual_binary_opcodes[i];
+        TEST_PREDICATE(
+            _PyUop_Flags[opcode] == (HAS_ARG_FLAG | HAS_PURE_FLAG),
+            "virtual float binary uop unexpectedly exits or escapes"
+        );
+        TEST_PREDICATE(
+            _PyUop_num_popped(opcode, 0) == 2,
+            "virtual float binary uop has the wrong input stack effect"
+        );
+        for (int incoming = 0; incoming <= MAX_CACHED_REGISTER; incoming++) {
+            int depth = _PyUop_Caching[opcode].best[incoming];
+            TEST_PREDICATE(
+                depth >= 0 && depth <= MAX_CACHED_REGISTER,
+                "virtual float binary uop has no usable cache form"
+            );
+            const _PyUopTOSentry *entry =
+                &_PyUop_Caching[opcode].entries[depth];
+            TEST_PREDICATE(
+                entry->output == MAX_CACHED_REGISTER &&
+                    entry->exit == depth,
+                "virtual float binary uop has an invalid cache effect"
+            );
+            TEST_PREDICATE(
+                _PyUop_Uncached[entry->opcode] == opcode,
+                "virtual float binary cache form has an invalid base uop"
+            );
+        }
+    }
+
+    TEST_PREDICATE(
+        _PyUop_Flags[_UNARY_NEGATIVE_FLOAT_VIRTUAL] ==
+            (HAS_ARG_FLAG | HAS_PURE_FLAG),
+        "virtual float negation unexpectedly exits or escapes"
+    );
+    TEST_PREDICATE(
+        _PyUop_num_popped(_UNARY_NEGATIVE_FLOAT_VIRTUAL, 0) == 1,
+        "virtual float negation has the wrong input stack effect"
+    );
+    static const int virtual_unary_outputs[MAX_CACHED_REGISTER] = {2, 2, 3};
+    for (int incoming = 0; incoming <= MAX_CACHED_REGISTER; incoming++) {
+        int depth = _PyUop_Caching[_UNARY_NEGATIVE_FLOAT_VIRTUAL].best[incoming];
+        TEST_PREDICATE(
+            depth >= 0 && depth < MAX_CACHED_REGISTER,
+            "virtual float negation has no usable cache form"
+        );
+        const _PyUopTOSentry *entry =
+            &_PyUop_Caching[_UNARY_NEGATIVE_FLOAT_VIRTUAL].entries[depth];
+        TEST_PREDICATE(
+            entry->output == virtual_unary_outputs[depth] &&
+                entry->exit == depth,
+            "virtual float negation has an invalid cache effect"
+        );
+        TEST_PREDICATE(
+            _PyUop_Uncached[entry->opcode] ==
+                _UNARY_NEGATIVE_FLOAT_VIRTUAL,
+            "virtual float negation cache form has an invalid base uop"
+        );
+    }
+
+    /* A one-input pop has one generated form for each possible incoming cache
+     * depth.  Validate that all forms reduce the cache depth by one when the
+     * value is cached, and all map back to the raw discard uop. */
+    static const int discard_outputs[MAX_CACHED_REGISTER + 1] = {0, 0, 1, 2};
+    static const int discard_opcodes[MAX_CACHED_REGISTER + 1] = {
+        _POP_TOP_VIRTUAL_FLOAT_r00,
+        _POP_TOP_VIRTUAL_FLOAT_r10,
+        _POP_TOP_VIRTUAL_FLOAT_r21,
+        _POP_TOP_VIRTUAL_FLOAT_r32,
+    };
+    TEST_PREDICATE(
+        _PyUop_Flags[_POP_TOP_VIRTUAL_FLOAT] == 0,
+        "virtual-float discard unexpectedly exits or escapes"
+    );
+    TEST_PREDICATE(
+        _PyUop_num_popped(_POP_TOP_VIRTUAL_FLOAT, 0) == 1,
+        "virtual-float discard has the wrong stack effect"
+    );
+    for (int depth = 0; depth <= MAX_CACHED_REGISTER; depth++) {
+        const _PyUopTOSentry *entry =
+            &_PyUop_Caching[_POP_TOP_VIRTUAL_FLOAT].entries[depth];
+        TEST_PREDICATE(
+            entry->output == discard_outputs[depth] &&
+                entry->exit == depth &&
+                entry->opcode == discard_opcodes[depth],
+            "virtual-float discard has an invalid register-cache form"
+        );
+        TEST_PREDICATE(
+            _PyUop_Uncached[entry->opcode] == _POP_TOP_VIRTUAL_FLOAT,
+            "virtual-float discard cache form has an invalid base uop"
+        );
+    }
+
+    /* Materialization replaces one raw input with one boxed output.  It may
+     * fail, but it must use the pop-on-error convention: generated error paths
+     * spill only the other cached Python references, never the raw input. */
+    static const int materialize_outputs[MAX_CACHED_REGISTER + 1] = {1, 1, 2, 3};
+    static const int materialize_opcodes[MAX_CACHED_REGISTER + 1] = {
+        _MATERIALIZE_VIRTUAL_FLOAT_r01,
+        _MATERIALIZE_VIRTUAL_FLOAT_r11,
+        _MATERIALIZE_VIRTUAL_FLOAT_r22,
+        _MATERIALIZE_VIRTUAL_FLOAT_r33,
+    };
+    TEST_PREDICATE(
+        _PyUop_Flags[_MATERIALIZE_VIRTUAL_FLOAT] == HAS_ERROR_FLAG,
+        "virtual-float materialization has invalid error semantics"
+    );
+    TEST_PREDICATE(
+        _PyUop_num_popped(_MATERIALIZE_VIRTUAL_FLOAT, 0) == 1,
+        "virtual-float materialization has the wrong input stack effect"
+    );
+    for (int depth = 0; depth <= MAX_CACHED_REGISTER; depth++) {
+        const _PyUopTOSentry *entry =
+            &_PyUop_Caching[_MATERIALIZE_VIRTUAL_FLOAT].entries[depth];
+        TEST_PREDICATE(
+            entry->output == materialize_outputs[depth] &&
+                entry->exit == depth &&
+                entry->opcode == materialize_opcodes[depth],
+            "virtual-float materialization has an invalid register-cache form"
+        );
+        TEST_PREDICATE(
+            _PyUop_Uncached[entry->opcode] == _MATERIALIZE_VIRTUAL_FLOAT,
+            "virtual-float materialization cache form has an invalid base uop"
+        );
+    }
+
+    JitOptRef virtual_float = _Py_uop_sym_new_type(ctx, &PyFloat_Type);
+    TEST_PREDICATE(
+        _Py_uop_alloc_get(ctx, virtual_float).state == JIT_ALLOC_CONCRETE,
+        "new symbol is not concrete"
+    );
+    JitVirtualRef virtual_ref =
+        _Py_uop_alloc_new_virtual_float(ctx, virtual_float);
+    TEST_PREDICATE(
+        virtual_ref != JIT_VIRTUAL_REF_NULL,
+        "failed to create virtual float"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_is_virtual(ctx, virtual_float),
+        "virtual float is concrete"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_get(
+            ctx, PyJitRef_Borrow(virtual_float)).virtual_ref == virtual_ref,
+        "borrowed reference has different allocation state"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_get(
+            ctx, PyJitRef_MakeUnique(virtual_float)).virtual_ref == virtual_ref,
+        "unique reference has different allocation state"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_new_virtual_float(ctx, virtual_float) == virtual_ref,
+        "virtualizing a symbol twice changed its identity"
+    );
+    const JitVirtualObject *virtual_object =
+        _Py_uop_alloc_resolve_virtual(ctx, virtual_float);
+    TEST_PREDICATE(
+        virtual_object != NULL && virtual_object->kind == JIT_VIRTUAL_FLOAT,
+        "virtual float did not resolve to a float descriptor"
+    );
+    TEST_PREDICATE(
+        _Py_uop_sym_matches_type(virtual_float, &PyFloat_Type),
+        "virtual float lost its ordinary float type"
+    );
+    TEST_PREDICATE(
+        _Py_uop_sym_is_not_null(virtual_float),
+        "virtual float lost its ordinary non-null fact"
+    );
+    JitOptRef materialized = _Py_uop_alloc_materialize_virtual_float(
+        ctx, PyJitRef_MakeUnique(virtual_float));
+    TEST_PREDICATE(
+        !PyJitRef_IsNull(materialized) && PyJitRef_IsUnique(materialized),
+        "materialization did not produce a fresh unique symbol"
+    );
+    TEST_PREDICATE(
+        _Py_uop_sym_matches_type(materialized, &PyFloat_Type) &&
+            !_Py_uop_alloc_is_virtual(ctx, materialized),
+        "materialization did not produce a concrete exact float"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_is_virtual(ctx, virtual_float),
+        "materialization retroactively changed the virtual symbol"
+    );
+    TEST_PREDICATE(
+        PyJitRef_IsNull(
+            _Py_uop_alloc_materialize_virtual_float(ctx, virtual_float)),
+        "materialization accepted a non-unique virtual value"
+    );
+
+    JitOptSymbol foreign_symbol = {.tag = JIT_SYM_UNKNOWN_TAG};
+    TEST_PREDICATE(
+        !_Py_uop_alloc_is_virtual(ctx, PyJitRef_NULL),
+        "NULL reference is virtual"
+    );
+    TEST_PREDICATE(
+        !_Py_uop_alloc_is_virtual(ctx, PyJitRef_WrapInvalid(ctx)),
+        "invalid reference is virtual"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_new_virtual_float(
+            ctx, PyJitRef_Wrap(&foreign_symbol)) == JIT_VIRTUAL_REF_NULL,
+        "out-of-arena reference was virtualized"
+    );
+    TEST_PREDICATE(
+        !_Py_uop_alloc_set_concrete(ctx, PyJitRef_NULL),
+        "NULL reference was made concrete"
+    );
+    JitOptRef concrete_int = _Py_uop_sym_new_type(ctx, &PyLong_Type);
+    TEST_PREDICATE(
+        _Py_uop_alloc_new_virtual_float(ctx, concrete_int) ==
+            JIT_VIRTUAL_REF_NULL,
+        "non-float symbol was virtualized as a float"
+    );
+    TEST_PREDICATE(
+        !_Py_uop_alloc_is_virtual(ctx, concrete_int),
+        "rejected non-float symbol became virtual"
+    );
+
+    /* The generated optimizer moves JitOptRefs through locals and the stack.
+     * Since allocation state is keyed by the unwrapped symbol, these ordinary
+     * assignments are the allocation-domain transfer functions for loads and
+     * swaps; they do not need a parallel representation stack. */
+    _Py_UOpsAbstractFrame *frame = &ctx->frames[0];
+    frame->locals = ctx->locals_array;
+    frame->locals_len = 2;
+    frame->stack = ctx->stack_array;
+    frame->stack_len = 4;
+    frame->locals[0] = PyJitRef_RemoveUnique(
+        PyJitRef_MakeUnique(virtual_float));
+    frame->locals[1] = concrete_int;
+
+    JitOptRef *stack_pointer = frame->stack;
+    *stack_pointer++ = frame->locals[0];  // _LOAD_FAST
+    *stack_pointer++ = PyJitRef_Borrow(frame->locals[0]);
+    JitOptRef ordinary_float = _Py_uop_sym_new_type(ctx, &PyFloat_Type);
+    *stack_pointer++ = ordinary_float;
+    TEST_PREDICATE(
+        _Py_uop_alloc_validate_frame(ctx, frame, stack_pointer),
+        "allocation state is invalid after loading values"
+    );
+    ctx->virtuals.arena[virtual_ref - 1].kind = JIT_VIRTUAL_INVALID;
+    TEST_PREDICATE(
+        !_Py_uop_alloc_validate_frame(ctx, frame, stack_pointer),
+        "invalid virtual descriptor passed frame validation"
+    );
+    ctx->virtuals.arena[virtual_ref - 1].kind = JIT_VIRTUAL_FLOAT;
+    TEST_PREDICATE(
+        _Py_uop_alloc_frame_has_virtual(ctx, frame, stack_pointer),
+        "loaded virtual value is not live"
+    );
+    TEST_PREDICATE(
+        !_Py_uop_alloc_is_virtual(ctx, ordinary_float),
+        "ordinary producer created a virtual value"
+    );
+
+    JitOptRef temp = frame->stack[0];  // _SWAP
+    frame->stack[0] = frame->stack[2];
+    frame->stack[2] = temp;
+    TEST_PREDICATE(
+        !_Py_uop_alloc_is_virtual(ctx, frame->stack[0]) &&
+            _Py_uop_alloc_is_virtual(ctx, frame->stack[2]),
+        "swap did not move allocation state with its symbols"
+    );
+
+    stack_pointer--;  // _POP_TOP makes the top virtual value dead.
+    TEST_PREDICATE(
+        _Py_uop_alloc_validate_frame(ctx, frame, stack_pointer),
+        "allocation state is invalid after popping a value"
+    );
+    stack_pointer--;
+    frame->locals[0] = concrete_int;
+    TEST_PREDICATE(
+        !_Py_uop_alloc_frame_has_virtual(ctx, frame, stack_pointer),
+        "dead virtual values are still reported as live"
+    );
+
+    TEST_PREDICATE(
+        _Py_uop_alloc_set_concrete(ctx, virtual_float),
+        "failed to make a valid reference concrete"
+    );
+    TEST_PREDICATE(
+        !_Py_uop_alloc_is_virtual(ctx, virtual_float),
+        "reference remained virtual after being made concrete"
+    );
+
+    virtual_float = _Py_uop_sym_new_type(ctx, &PyFloat_Type);
+    ctx->virtuals.virtual_max_number = ctx->virtuals.virtual_curr_number;
+    TEST_PREDICATE(
+        _Py_uop_alloc_new_virtual_float(ctx, virtual_float) ==
+            JIT_VIRTUAL_REF_NULL,
+        "virtual arena exhaustion created a descriptor"
+    );
+    TEST_PREDICATE(
+        ctx->done && ctx->out_of_space,
+        "virtual arena exhaustion did not stop optimization"
+    );
+
+    _Py_uop_abstractcontext_fini(ctx);
+    Py_RETURN_NONE;
+
+fail:
+    _Py_uop_abstractcontext_fini(ctx);
     return NULL;
 }
 

@@ -85,6 +85,19 @@ typedef struct _JitOptContext {
     // Arena for the symbolic types.
     ty_arena t_arena;
 
+    /* Allocation representation for each type-arena symbol.  Zero entries
+     * are concrete; non-zero entries index virtuals.arena plus one. */
+    JitVirtualRef allocations[TY_ARENA_SIZE];
+    JitVirtualArena virtuals;
+
+    /* Bounds for the input trace currently being abstractly interpreted.
+     * Stage 4 uses the end pointer for a deliberately narrow lookahead: a
+     * float multiply may produce raw bits only when its result is immediately
+     * discarded without crossing an operation that can observe or exit with
+     * it. */
+    const _PyUOpInstruction *input_trace_end;
+    bool virtual_floats_enabled;
+
     /* To do -- We could make this more space efficient
      * by using a single array and growing the stack and
      * locals toward each other. */
@@ -474,6 +487,33 @@ extern PyObject *_Py_uop_sym_get_probable_value(JitOptRef sym);
 extern PyTypeObject *_Py_uop_sym_get_probable_type(JitOptRef sym);
 extern JitOptRef *_Py_uop_sym_set_stack_depth(JitOptContext *ctx, int stack_depth, JitOptRef *current_sp);
 
+extern JitOptAllocation _Py_uop_alloc_get(JitOptContext *ctx, JitOptRef ref);
+extern bool _Py_uop_alloc_is_virtual(JitOptContext *ctx, JitOptRef ref);
+extern bool _Py_uop_alloc_set_concrete(JitOptContext *ctx, JitOptRef ref);
+extern JitVirtualRef _Py_uop_alloc_new_virtual_float(
+    JitOptContext *ctx, JitOptRef ref);
+extern JitOptRef _Py_uop_alloc_materialize_virtual_float(
+    JitOptContext *ctx, JitOptRef ref);
+extern const JitVirtualObject *_Py_uop_alloc_resolve_virtual(
+    JitOptContext *ctx, JitOptRef ref);
+extern bool _Py_uop_alloc_frame_has_virtual(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer);
+extern int _Py_uop_alloc_frame_virtual_count(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer);
+extern bool _Py_uop_alloc_validate_frame(
+    JitOptContext *ctx,
+    _Py_UOpsAbstractFrame *frame,
+    JitOptRef *stack_pointer);
+
+extern bool _Py_uop_can_virtualize_float_result(
+    JitOptContext *ctx,
+    const _PyUOpInstruction *producer,
+    int cleanup_count);
+
 extern void _Py_uop_abstractcontext_init(JitOptContext *ctx, _PyBloomFilter *dependencies);
 extern void _Py_uop_abstractcontext_fini(JitOptContext *ctx);
 
@@ -492,6 +532,8 @@ extern _Py_UOpsAbstractFrame *_Py_uop_frame_new_from_symbol(
 extern int _Py_uop_frame_pop(JitOptContext *ctx, PyCodeObject *co);
 
 PyAPI_FUNC(PyObject *) _Py_uop_symbols_test(PyObject *self, PyObject *ignored);
+PyAPI_FUNC(PyObject *) _Py_uop_virtualization_test(
+    PyObject *self, PyObject *ignored);
 
 PyAPI_FUNC(int) _PyOptimizer_Optimize(_PyInterpreterFrame *frame, PyThreadState *tstate);
 

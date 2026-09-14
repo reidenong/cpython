@@ -3443,6 +3443,7 @@ static PyMethodDef module_functions[] = {
 #endif
 #ifdef _Py_TIER2
     {"uop_symbols_test", _Py_uop_symbols_test, METH_NOARGS},
+    {"uop_virtualization_test", _Py_uop_virtualization_test, METH_NOARGS},
 #endif
     GH_119213_GETARGS_METHODDEF
     {"get_static_builtin_types", get_static_builtin_types, METH_NOARGS},

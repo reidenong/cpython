@@ -138,6 +138,40 @@ typedef union {
     uintptr_t bits;
 } JitOptRef;
 
+/* Allocation representation is an abstract domain separate from
+ * JitOptSymbol.  A zero JitVirtualRef means that the corresponding Python
+ * value is concrete; non-zero references identify virtual-object descriptors.
+ */
+typedef enum {
+    JIT_ALLOC_CONCRETE,
+    JIT_ALLOC_VIRTUAL,
+} JitOptAllocationState;
+
+typedef enum {
+    JIT_VIRTUAL_INVALID,
+    JIT_VIRTUAL_FLOAT,
+} JitVirtualKind;
+
+typedef uint16_t JitVirtualRef;
+
+#define JIT_VIRTUAL_REF_NULL ((JitVirtualRef)0)
+#define VIRTUAL_ARENA_SIZE UOP_MAX_TRACE_LENGTH
+
+typedef struct {
+    JitOptAllocationState state;
+    JitVirtualRef virtual_ref;
+} JitOptAllocation;
+
+typedef struct {
+    uint8_t kind;
+} JitVirtualObject;
+
+typedef struct {
+    int virtual_curr_number;
+    int virtual_max_number;
+    JitVirtualObject arena[VIRTUAL_ARENA_SIZE];
+} JitVirtualArena;
+
 typedef struct _Py_UOpsAbstractFrame {
     bool globals_watched;
     bool builtins_checked;

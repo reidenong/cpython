@@ -4062,6 +4062,220 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertIn("_POP_TOP_NOP", uops)
 
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_multiply_discard_is_virtual(self):
+        def testfunc(args):
+            a, b, n = args
+            for _ in range(n):
+                a * b
+            return 42
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 42)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_POP_TOP_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_multiply_stored_result_is_materialized(self):
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = a * b
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 6.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
+        self.assertNotIn("_POP_TOP_VIRTUAL_FLOAT", uops)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_expression_tree(self):
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = (a * b) + (a * b)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 12.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertEqual(
+            count_ops(ex, "_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL"), 2)
+        self.assertIn("_BINARY_OP_ADD_FLOAT_VIRTUAL", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
+        self.assertNotIn("_BINARY_OP_ADD_FLOAT", uops)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_multiply_chain(self):
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = (a * b) * a
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 12.0)
+        self.assertIsNotNone(ex)
+        self.assertEqual(
+            count_ops(ex, "_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL"), 2)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", get_opnames(ex))
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_mixed_subtract_operands(self):
+        def virtual_left(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = (a * b) - a
+            return result
+
+        def virtual_right(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = a - (a * b)
+            return result
+
+        args = (2.0, 3.0, TIER2_THRESHOLD)
+        for func, expected, expected_mask in (
+            (virtual_left, 4.0, 1),   # raw left operand
+            (virtual_right, -4.0, 2),  # raw right operand
+        ):
+            with self.subTest(expected_mask=expected_mask):
+                res, ex = self._run_with_optimizer(func, args)
+                self.assertEqual(res, expected)
+                self.assertIsNotNone(ex)
+                subtracts = [
+                    op for op in get_ops(ex)
+                    if op[0] == "_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL"
+                ]
+                self.assertEqual(len(subtracts), 1)
+                self.assertEqual(subtracts[0][1], expected_mask)
+                self.assertEqual(
+                    count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_unary_negative(self):
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = -(a * b)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, -6.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_UNARY_NEGATIVE_FLOAT_VIRTUAL", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertNotIn("_UNARY_NEGATIVE_FLOAT_INPLACE", uops)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_preserves_special_values(self):
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = -((a * b) - a)
+            return result
+
+        _, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertIsNotNone(ex)
+        for a, b in (
+            (-0.0, 1.0),
+            (float("inf"), 1.0),
+            (float("nan"), -2.0),
+        ):
+            with self.subTest(a=a, b=b):
+                expected = -((a * b) - a)
+                result = testfunc((a, b, 1))
+                # float.hex() distinguishes the signs of zero while also
+                # giving stable spellings for infinities and NaNs.
+                self.assertEqual(result.hex(), expected.hex())
+
+    def test_float_virtual_result_materializes_before_unknown_guard(self):
+        def testfunc(args):
+            a, b, total, n = args
+            for _ in range(n):
+                total += a * b
+            return total
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, 0.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 6.0 * TIER2_THRESHOLD)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
+        self.assertNotIn("_POP_TOP_VIRTUAL_FLOAT", uops)
+        # The materialization precedes the guard for the loop-carried total.
+        # A later int value must deopt with an entirely valid object stack.
+        self.assertEqual(testfunc((2.0, 3.0, 0, 1)), 6.0)
+
     def test_float_add_inplace_unique_lhs(self):
         # a * b produces a unique float; adding c reuses it in place
         def testfunc(args):
@@ -4092,10 +4306,17 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertIn("_BINARY_OP_ADD_FLOAT_INPLACE_RIGHT", uops)
 
-    def test_float_add_no_inplace_non_unique(self):
-        # Both operands of a + b are locals — neither is unique,
-        # so the first add is regular. But total += (a+b) has a
-        # unique RHS, so it uses _INPLACE_RIGHT.
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_add_non_unique_is_virtualized(self):
+        # Both operands of a + b are borrowed locals. The expression result is
+        # virtualized, then materialized before the unknown loop-carried total
+        # guard. The subsequent += can still reuse that unique box.
         def testfunc(args):
             a, b, n = args
             total = 0.0
@@ -4107,11 +4328,10 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertAlmostEqual(res, TIER2_THRESHOLD * 5.0)
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
-        # a + b: both are locals, no inplace
-        self.assertIn("_BINARY_OP_ADD_FLOAT", uops)
-        # total += result: result is unique RHS
+        self.assertIn("_BINARY_OP_ADD_FLOAT_VIRTUAL", uops)
+        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
         self.assertIn("_BINARY_OP_ADD_FLOAT_INPLACE_RIGHT", uops)
-        # No LHS inplace variant for the first add
+        self.assertNotIn("_BINARY_OP_ADD_FLOAT", uops)
         self.assertNotIn("_BINARY_OP_ADD_FLOAT_INPLACE", uops)
 
     def test_float_subtract_inplace_unique_lhs(self):
@@ -4197,8 +4417,15 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertTrue(inplace_add,
             "Expected an inplace add for unique intermediate results")
 
-    def test_float_negate_inplace_unique(self):
-        # -(a * b): the product is unique, negate it in place
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_negate_virtual_product(self):
+        # Both the product and its negation stay raw until the += guard.
         def testfunc(args):
             a, b, n = args
             total = 0.0
@@ -4210,7 +4437,10 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertAlmostEqual(res, TIER2_THRESHOLD * -6.0)
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
-        self.assertIn("_UNARY_NEGATIVE_FLOAT_INPLACE", uops)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_UNARY_NEGATIVE_FLOAT_VIRTUAL", uops)
+        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_UNARY_NEGATIVE_FLOAT_INPLACE", uops)
 
     def test_float_negate_no_inplace_non_unique(self):
         # -a where a is a local — not unique, no inplace
