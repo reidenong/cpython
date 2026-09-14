@@ -265,8 +265,12 @@ PyAPI_FUNC(PyThreadState *) PyThreadState_GetUnchecked(void);
 typedef struct {
     /* Borrowed references and pointers, valid while the GIL is held. */
     PyCodeObject *code;
+    PyObject *executor;
+    PyCodeObject *executor_code;
     const char *operation_name;
     int bytecode_offset;
+    int executor_bytecode_offset;
+    int trace_offset;
     int tier;
     int operation_id;
 } PyUnstable_ExecutionLocation;

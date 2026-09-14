@@ -2639,7 +2639,11 @@ PyUnstable_ThreadState_GetExecutionLocation(
     }
 
     location->code = _PyFrame_GetCode(frame);
+    location->executor = NULL;
+    location->executor_code = NULL;
     location->bytecode_offset = PyUnstable_InterpreterFrame_GetLasti(frame);
+    location->executor_bytecode_offset = -1;
+    location->trace_offset = -1;
     location->tier = 1;
     location->operation_id = -1;
     location->operation_name = NULL;
@@ -2647,10 +2651,25 @@ PyUnstable_ThreadState_GetExecutionLocation(
 #if defined(Py_STATS) && defined(_Py_TIER2)
     _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
     if (tstate->current_executor != NULL) {
+        _PyExecutorObject *executor =
+            (_PyExecutorObject *)tstate->current_executor;
         const _PyUOpInstruction *uop = tstate_impl->current_uop;
         if (uop == NULL) {
             return 0;
         }
+        uintptr_t trace_start = (uintptr_t)executor->trace;
+        uintptr_t uop_address = (uintptr_t)uop;
+        uintptr_t trace_size = executor->code_size * sizeof(*uop);
+        if (uop_address < trace_start ||
+            uop_address >= trace_start + trace_size ||
+            (uop_address - trace_start) % sizeof(*uop) != 0) {
+            return 0;
+        }
+        size_t trace_offset = (uop_address - trace_start) / sizeof(*uop);
+        location->executor = (PyObject *)executor;
+        location->executor_code = executor->vm_data.code;
+        location->executor_bytecode_offset = executor->vm_data.index * 2;
+        location->trace_offset = (int)trace_offset;
         location->bytecode_offset = uop->source_offset;
         location->tier = 2;
         location->operation_id = uop->opcode;

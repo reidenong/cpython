@@ -461,9 +461,64 @@ get_jit_code(PyObject *self, PyObject *Py_UNUSED(ignored))
 #endif
 }
 
+static PyObject *
+get_trace(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    _PyExecutorObject *executor = _PyExecutorObject_CAST(self);
+    PyObject *trace = PyList_New(executor->code_size);
+    if (trace == NULL) {
+        return NULL;
+    }
+    for (uint32_t index = 0; index < executor->code_size; index++) {
+        const _PyUOpInstruction *instruction = &executor->trace[index];
+        const char *name = _PyUOpName(instruction->opcode);
+        if (name == NULL) {
+            name = "<unknown>";
+        }
+        int target;
+        int error_target;
+        const char *format;
+        if (instruction->format == UOP_FORMAT_JUMP) {
+            format = "jump";
+            target = instruction->jump_target;
+            error_target = instruction->error_target;
+        }
+        else {
+            format = "target";
+            target = (int)instruction->target;
+            error_target = -1;
+        }
+#ifdef Py_STATS
+        int source_offset = instruction->source_offset;
+        uint64_t execution_count = instruction->execution_count;
+#else
+        int source_offset = -1;
+        uint64_t execution_count = 0;
+#endif
+        PyObject *item = Py_BuildValue(
+            "{s:i,s:i,s:s,s:i,s:s,s:i,s:i,s:i,s:K}",
+            "index", (int)index,
+            "opcode", (int)instruction->opcode,
+            "opname", name,
+            "oparg", (int)instruction->oparg,
+            "format", format,
+            "target", target,
+            "error_target", error_target,
+            "source_offset", source_offset,
+            "execution_count", (unsigned long long)execution_count);
+        if (item == NULL) {
+            Py_DECREF(trace);
+            return NULL;
+        }
+        PyList_SET_ITEM(trace, index, item);
+    }
+    return trace;
+}
+
 static PyMethodDef uop_executor_methods[] = {
     { "is_valid", is_valid, METH_NOARGS, NULL },
     { "get_jit_code", get_jit_code, METH_NOARGS, NULL},
+    { "get_trace", get_trace, METH_NOARGS, NULL},
     { "get_opcode", get_opcode, METH_NOARGS, NULL },
     { "get_oparg", get_oparg, METH_NOARGS, NULL },
     { NULL, NULL },
