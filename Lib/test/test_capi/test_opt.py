@@ -4276,6 +4276,168 @@ class TestUopsOptimization(unittest.TestCase):
         # A later int value must deopt with an entirely valid object stack.
         self.assertEqual(testfunc((2.0, 3.0, 0, 1)), 6.0)
 
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_materializes_before_heap_store(self):
+        def testfunc(args):
+            a, b, box, n = args
+            for _ in range(n):
+                box[0] = a * b
+            return box[0]
+
+        box = [0.0]
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, box, TIER2_THRESHOLD))
+        self.assertEqual(res, 6.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertLess(
+            uops.index("_MATERIALIZE_VIRTUAL_FLOAT"),
+            uops.index("_STORE_SUBSCR_LIST_INT"),
+        )
+        # The product is below the list and index at the escape point.  It is
+        # moved to TOS for materialization and then restored before the store.
+        self.assertGreaterEqual(count_ops(ex, "_SWAP_3"), 2)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_materializes_before_copy_and_preserves_identity(self):
+        def testfunc(args):
+            a, b, n = args
+            same = False
+            result = 0.0
+            for _ in range(n):
+                result = alias = a * b
+                same = result is alias
+            return result, same
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, (6.0, True))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        # COPY duplicates the one box produced by materialization; it must not
+        # create two independently boxed floats with different identities.
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertIn("_IS_OP", uops)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_materializes_before_call(self):
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = abs(a * b)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (-2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 6.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertLess(
+            uops.index("_MATERIALIZE_VIRTUAL_FLOAT"),
+            uops.index("_CALL_BUILTIN_O"),
+        )
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_materializes_before_inlined_return(self):
+        def product(a, b):
+            return a * b
+
+        def testfunc(args):
+            a, b, n = args
+            result = 0.0
+            for _ in range(n):
+                result = product(a, b)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, 6.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_PUSH_FRAME", uops)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
+        self.assertLess(
+            uops.index("_MATERIALIZE_VIRTUAL_FLOAT"),
+            uops.index("_RETURN_VALUE"),
+        )
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_materialization_keeps_escape_consumer(self):
+        def testfunc(args):
+            a, b, n = args
+            result = ()
+            for _ in range(n):
+                result = (1, a * b)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, (1, 6.0))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        # Prefixing materialization must not accidentally replace the source
+        # consumer when its abstract rule emits no rewritten instruction.
+        self.assertIn("_BUILD_TUPLE", uops)
+
+    def test_float_virtual_multiple_escapes_retry(self):
+        def testfunc(args):
+            a, b, c, d, n = args
+            result = ()
+            for _ in range(n):
+                result = (a * b, c * d)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, 4.0, 5.0, TIER2_THRESHOLD))
+        self.assertEqual(res, (6.0, 20.0))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        # Materializing either raw value could fail while the other remained
+        # live, so this still uses the conservative all-concrete retry.
+        self.assertEqual(count_ops(ex, "_BINARY_OP_MULTIPLY_FLOAT"), 2)
+        self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+
     def test_float_add_inplace_unique_lhs(self):
         # a * b produces a unique float; adding c reuses it in place
         def testfunc(args):

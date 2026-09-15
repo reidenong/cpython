@@ -296,7 +296,7 @@
                 res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
             }
             else if (sym_matches_type(value, &PyFloat_Type) &&
-                 _Py_uop_can_virtualize_float_result(ctx, this_instr, 1))
+                 _Py_uop_can_virtualize_float_result(ctx))
             {
                 ADD_OP(_UNARY_NEGATIVE_FLOAT_VIRTUAL, 0, 0);
                 v = value;
@@ -1000,12 +1000,11 @@
             if (sym_matches_type(left, &PyFloat_Type)) {
                 ADD_OP(_NOP, 0, 0);
             }
-            else if (_Py_uop_alloc_frame_has_virtual(
-                     ctx, ctx->frame, stack_pointer))
+            else if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer))
             {
                 if (_Py_uop_alloc_is_virtual(ctx, guarded_right) &&
-                    _Py_uop_alloc_frame_virtual_count(
-                        ctx, ctx->frame, stack_pointer) == 1)
+                    _Py_uop_alloc_context_virtual_count(
+                        ctx, stack_pointer) == 1)
                 {
                     JitOptRef concrete =
                     _Py_uop_alloc_materialize_virtual_float(
@@ -1017,6 +1016,7 @@
                     guarded_right = concrete;
                 }
                 else {
+                    ctx->retry_without_virtuals = true;
                     ctx->done = true;
                     break;
                 }
@@ -1033,9 +1033,9 @@
             if (sym_matches_type(value, &PyFloat_Type)) {
                 ADD_OP(_NOP, 0, 0);
             }
-            else if (_Py_uop_alloc_frame_has_virtual(
-                     ctx, ctx->frame, stack_pointer))
+            else if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer))
             {
+                ctx->retry_without_virtuals = true;
                 ctx->done = true;
                 break;
             }
@@ -1075,7 +1075,7 @@
                 l = left;
                 r = PyJitRef_Borrow(sym_new_null(ctx));
             }
-            else if (_Py_uop_can_virtualize_float_result(ctx, this_instr, 2)) {
+            else if (_Py_uop_can_virtualize_float_result(ctx)) {
                 ADD_OP(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL, 0, 0);
                 l = left;
                 r = right;
@@ -1167,7 +1167,7 @@
                 l = left;
                 r = PyJitRef_Borrow(sym_new_null(ctx));
             }
-            else if (_Py_uop_can_virtualize_float_result(ctx, this_instr, 2)) {
+            else if (_Py_uop_can_virtualize_float_result(ctx)) {
                 ADD_OP(_BINARY_OP_ADD_FLOAT_VIRTUAL, 0, 0);
                 l = left;
                 r = right;
@@ -1259,7 +1259,7 @@
                 l = left;
                 r = PyJitRef_Borrow(sym_new_null(ctx));
             }
-            else if (_Py_uop_can_virtualize_float_result(ctx, this_instr, 2)) {
+            else if (_Py_uop_can_virtualize_float_result(ctx)) {
                 ADD_OP(_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL, 0, 0);
                 l = left;
                 r = right;

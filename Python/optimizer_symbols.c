@@ -280,6 +280,7 @@ _Py_uop_alloc_new_virtual_float(JitOptContext *ctx, JitOptRef ref)
     if (ctx->virtuals.virtual_curr_number >= ctx->virtuals.virtual_max_number) {
         OPT_STAT_INC(optimizer_failure_reason_no_memory);
         DPRINTF(1, "out of space for virtual-object descriptors\n");
+        ctx->retry_without_virtuals = true;
         out_of_space(ctx);
         return JIT_VIRTUAL_REF_NULL;
     }
@@ -395,6 +396,39 @@ _Py_uop_alloc_frame_virtual_count(
     return count;
 }
 
+int
+_Py_uop_alloc_context_virtual_count(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer)
+{
+    if (ctx->virtuals.virtual_curr_number == 0) {
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < ctx->curr_frame_depth; i++) {
+        _Py_UOpsAbstractFrame *frame = &ctx->frames[i];
+        JitOptRef *stack_pointer = frame == ctx->frame
+            ? current_stack_pointer : frame->stack_pointer;
+        int frame_count = _Py_uop_alloc_frame_virtual_count(
+            ctx, frame, stack_pointer);
+        if (frame_count < 0) {
+            return -1;
+        }
+        count += frame_count;
+    }
+    return count;
+}
+
+bool
+_Py_uop_alloc_context_has_virtual(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer)
+{
+    /* Invalid frame state is not proof that every runtime slot is boxed. */
+    return _Py_uop_alloc_context_virtual_count(
+        ctx, current_stack_pointer) != 0;
+}
+
 bool
 _Py_uop_alloc_validate_frame(
     JitOptContext *ctx,
@@ -411,6 +445,22 @@ _Py_uop_alloc_validate_frame(
     }
     for (JitOptRef *ref = frame->stack; ref < stack_pointer; ref++) {
         if (!allocation_is_valid(ctx, *ref)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+_Py_uop_alloc_validate_context(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer)
+{
+    for (int i = 0; i < ctx->curr_frame_depth; i++) {
+        _Py_UOpsAbstractFrame *frame = &ctx->frames[i];
+        JitOptRef *stack_pointer = frame == ctx->frame
+            ? current_stack_pointer : frame->stack_pointer;
+        if (!_Py_uop_alloc_validate_frame(ctx, frame, stack_pointer)) {
             return false;
         }
     }
@@ -1736,8 +1786,8 @@ _Py_uop_abstractcontext_init(JitOptContext *ctx, _PyBloomFilter *dependencies)
     ctx->t_arena.ty_max_number = TY_ARENA_SIZE;
     ctx->virtuals.virtual_curr_number = 0;
     ctx->virtuals.virtual_max_number = VIRTUAL_ARENA_SIZE;
-    ctx->input_trace_end = NULL;
     ctx->virtual_floats_enabled = false;
+    ctx->retry_without_virtuals = false;
 
     // Frame setup
     ctx->curr_frame_depth = 0;
@@ -2662,6 +2712,34 @@ _Py_uop_virtualization_test(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignor
         _Py_uop_alloc_frame_has_virtual(ctx, frame, stack_pointer),
         "loaded virtual value is not live"
     );
+
+    /* Context-wide scans include suspended callers as well as the current
+     * inlined frame.  The current frame's local stack pointer is supplied by
+     * the abstract-interpreter loop; callers use their saved pointer. */
+    frame->stack_pointer = stack_pointer;
+    _Py_UOpsAbstractFrame *inner = &ctx->frames[1];
+    inner->locals = &ctx->locals_array[2];
+    inner->locals_len = 1;
+    inner->locals[0] = concrete_int;
+    inner->stack = &ctx->stack_array[4];
+    inner->stack_len = 1;
+    inner->stack_pointer = inner->stack;
+    ctx->curr_frame_depth = 2;
+    ctx->frame = inner;
+    TEST_PREDICATE(
+        _Py_uop_alloc_context_virtual_count(ctx, inner->stack_pointer) == 3,
+        "context scan missed virtual values in a caller"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_context_has_virtual(ctx, inner->stack_pointer),
+        "context scan treated a virtual caller as concrete"
+    );
+    TEST_PREDICATE(
+        _Py_uop_alloc_validate_context(ctx, inner->stack_pointer),
+        "valid allocation state failed whole-context validation"
+    );
+    ctx->curr_frame_depth = 1;
+    ctx->frame = frame;
     TEST_PREDICATE(
         !_Py_uop_alloc_is_virtual(ctx, ordinary_float),
         "ordinary producer created a virtual value"
@@ -2705,8 +2783,8 @@ _Py_uop_virtualization_test(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignor
         "virtual arena exhaustion created a descriptor"
     );
     TEST_PREDICATE(
-        ctx->done && ctx->out_of_space,
-        "virtual arena exhaustion did not stop optimization"
+        ctx->done && ctx->out_of_space && ctx->retry_without_virtuals,
+        "virtual arena exhaustion did not request a non-virtual retry"
     );
 
     _Py_uop_abstractcontext_fini(ctx);

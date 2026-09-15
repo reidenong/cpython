@@ -67,10 +67,7 @@ extern void
 eliminate_pop_guard(_PyUOpInstruction *this_instr, JitOptContext *ctx, bool exit);
 
 extern bool
-_Py_uop_can_virtualize_float_result(
-    JitOptContext *ctx,
-    const _PyUOpInstruction *producer,
-    int cleanup_count);
+_Py_uop_can_virtualize_float_result(JitOptContext *ctx);
 
 extern PyCodeObject *get_code(_PyUOpInstruction *op);
 
@@ -293,11 +290,11 @@ dummy_func(void) {
         if (sym_matches_type(value, &PyFloat_Type)) {
             ADD_OP(_NOP, 0, 0);
         }
-        else if (_Py_uop_alloc_frame_has_virtual(
-                     ctx, ctx->frame, stack_pointer))
+        else if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer))
         {
             /* Deoptimizing here would expose another live raw slot to Tier 1.
-             * Reject this conservative Stage 6 attempt instead. */
+             * Repeat the optimizer pass without virtualization instead. */
+            ctx->retry_without_virtuals = true;
             ctx->done = true;
             break;
         }
@@ -310,15 +307,13 @@ dummy_func(void) {
         if (sym_matches_type(left, &PyFloat_Type)) {
             ADD_OP(_NOP, 0, 0);
         }
-        else if (_Py_uop_alloc_frame_has_virtual(
-                     ctx, ctx->frame, stack_pointer))
+        else if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer))
         {
-            /* The only barrier supported during Stage 6 is a float guard whose
-             * other input is the sole live virtual and is on TOS.  Box that
-             * value before retaining the possibly deoptimizing NOS guard. */
+            /* If the other input is the sole live virtual and is on TOS, box
+             * it before retaining the possibly deoptimizing NOS guard. */
             if (_Py_uop_alloc_is_virtual(ctx, guarded_right) &&
-                _Py_uop_alloc_frame_virtual_count(
-                    ctx, ctx->frame, stack_pointer) == 1)
+                _Py_uop_alloc_context_virtual_count(
+                    ctx, stack_pointer) == 1)
             {
                 JitOptRef concrete =
                     _Py_uop_alloc_materialize_virtual_float(
@@ -330,6 +325,7 @@ dummy_func(void) {
                 guarded_right = concrete;
             }
             else {
+                ctx->retry_without_virtuals = true;
                 ctx->done = true;
                 break;
             }
@@ -509,7 +505,7 @@ dummy_func(void) {
             l = left;
             r = PyJitRef_Borrow(sym_new_null(ctx));
         }
-        else if (_Py_uop_can_virtualize_float_result(ctx, this_instr, 2)) {
+        else if (_Py_uop_can_virtualize_float_result(ctx)) {
             ADD_OP(_BINARY_OP_ADD_FLOAT_VIRTUAL, 0, 0);
             l = left;
             r = right;
@@ -552,7 +548,7 @@ dummy_func(void) {
             l = left;
             r = PyJitRef_Borrow(sym_new_null(ctx));
         }
-        else if (_Py_uop_can_virtualize_float_result(ctx, this_instr, 2)) {
+        else if (_Py_uop_can_virtualize_float_result(ctx)) {
             ADD_OP(_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL, 0, 0);
             l = left;
             r = right;
@@ -595,7 +591,7 @@ dummy_func(void) {
             l = left;
             r = PyJitRef_Borrow(sym_new_null(ctx));
         }
-        else if (_Py_uop_can_virtualize_float_result(ctx, this_instr, 2)) {
+        else if (_Py_uop_can_virtualize_float_result(ctx)) {
             ADD_OP(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL, 0, 0);
             l = left;
             r = right;
@@ -938,7 +934,7 @@ dummy_func(void) {
             res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
         }
         else if (sym_matches_type(value, &PyFloat_Type) &&
-                 _Py_uop_can_virtualize_float_result(ctx, this_instr, 1))
+                 _Py_uop_can_virtualize_float_result(ctx))
         {
             ADD_OP(_UNARY_NEGATIVE_FLOAT_VIRTUAL, 0, 0);
             v = value;

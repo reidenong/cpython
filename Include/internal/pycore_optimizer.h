@@ -90,13 +90,11 @@ typedef struct _JitOptContext {
     JitVirtualRef allocations[TY_ARENA_SIZE];
     JitVirtualArena virtuals;
 
-    /* Bounds for the input trace currently being abstractly interpreted.
-     * Stage 4 uses the end pointer for a deliberately narrow lookahead: a
-     * float multiply may produce raw bits only when its result is immediately
-     * discarded without crossing an operation that can observe or exit with
-     * it. */
-    const _PyUOpInstruction *input_trace_end;
+    /* Virtualization is attempted transactionally.  If a raw value reaches a
+     * barrier that cannot reconstruct it, the optimizer discards this output
+     * and repeats the same analysis with virtual floats disabled. */
     bool virtual_floats_enabled;
+    bool retry_without_virtuals;
 
     /* To do -- We could make this more space efficient
      * by using a single array and growing the stack and
@@ -504,15 +502,22 @@ extern int _Py_uop_alloc_frame_virtual_count(
     JitOptContext *ctx,
     _Py_UOpsAbstractFrame *frame,
     JitOptRef *stack_pointer);
+extern bool _Py_uop_alloc_context_has_virtual(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer);
+extern int _Py_uop_alloc_context_virtual_count(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer);
 extern bool _Py_uop_alloc_validate_frame(
     JitOptContext *ctx,
     _Py_UOpsAbstractFrame *frame,
     JitOptRef *stack_pointer);
+extern bool _Py_uop_alloc_validate_context(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer);
 
 extern bool _Py_uop_can_virtualize_float_result(
-    JitOptContext *ctx,
-    const _PyUOpInstruction *producer,
-    int cleanup_count);
+    JitOptContext *ctx);
 
 extern void _Py_uop_abstractcontext_init(JitOptContext *ctx, _PyBloomFilter *dependencies);
 extern void _Py_uop_abstractcontext_fini(JitOptContext *ctx);
