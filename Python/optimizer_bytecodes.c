@@ -836,11 +836,22 @@ dummy_func(void) {
     }
 
     op(_TO_BOOL, (value -- res)) {
-        int already_bool = optimize_to_bool(this_instr, ctx, value, &res,
-                                            _POP_TOP, _NOP);
-        if (!already_bool) {
+        if (_Py_uop_alloc_is_virtual(ctx, value)) {
+            ADD_OP(_TO_BOOL_FLOAT_VIRTUAL, 0, 0);
             res = sym_new_truthiness(ctx, value, true);
         }
+        else {
+            int already_bool = optimize_to_bool(this_instr, ctx, value, &res,
+                                                _POP_TOP, _NOP);
+            if (!already_bool) {
+                res = sym_new_truthiness(ctx, value, true);
+            }
+        }
+    }
+
+    op(_TO_BOOL_FLOAT_VIRTUAL, (value -- res)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, value));
+        res = sym_new_truthiness(ctx, value, true);
     }
 
     op(_TO_BOOL_BOOL, (value -- value)) {
@@ -1017,6 +1028,8 @@ dummy_func(void) {
     }
 
     op(_COMPARE_OP_FLOAT, (left, right -- res, l, r)) {
+        bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
+        bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
         int cmp_mask = oparg & (COMPARE_LT_MASK | COMPARE_GT_MASK | COMPARE_EQ_MASK);
 
         if (cmp_mask == COMPARE_EQ_MASK) {
@@ -1028,9 +1041,44 @@ dummy_func(void) {
         else {
             res = sym_new_type(ctx, &PyBool_Type);
         }
-        l = left;
-        r = right;
-        REPLACE_OPCODE_IF_EVALUATES_PURE(left, right, res);
+        if (left_virtual || right_virtual) {
+            int virtual_mask =
+                (left_virtual
+                    ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT : 0) |
+                (right_virtual
+                    ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT : 0);
+            ADD_OP(_COMPARE_OP_FLOAT_VIRTUAL, oparg | virtual_mask, 0);
+            l = left_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : left;
+            r = right_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : right;
+        }
+        else {
+            l = left;
+            r = right;
+            REPLACE_OPCODE_IF_EVALUATES_PURE(left, right, res);
+        }
+    }
+
+    op(_COMPARE_OP_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
+        bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
+        bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
+        int virtual_mask =
+            (left_virtual ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT : 0) |
+            (right_virtual ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT : 0);
+        assert((oparg & _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_MASK) ==
+               virtual_mask);
+        int cmp_mask = oparg &
+            (COMPARE_LT_MASK | COMPARE_GT_MASK | COMPARE_EQ_MASK);
+        if (cmp_mask == COMPARE_EQ_MASK) {
+            res = sym_new_predicate(ctx, left, right, JIT_PRED_EQ);
+        }
+        else if (cmp_mask == (COMPARE_LT_MASK | COMPARE_GT_MASK)) {
+            res = sym_new_predicate(ctx, left, right, JIT_PRED_NE);
+        }
+        else {
+            res = sym_new_type(ctx, &PyBool_Type);
+        }
+        l = left_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : left;
+        r = right_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : right;
     }
 
     op(_COMPARE_OP_STR, (left, right -- res, l, r)) {

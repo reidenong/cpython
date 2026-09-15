@@ -72,6 +72,15 @@ _PyJIT_UnpackRawDouble(_PyStackRef value)
 #define _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT 1
 #define _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT 2
 
+/* COMPARE_OP already uses bits 0 through 7 for its comparison operation,
+ * result mask, and boolean-conversion flag.  Its virtual-float representation
+ * mask therefore lives in the next two bits. */
+#define _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT (1 << 8)
+#define _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT (1 << 9)
+#define _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_MASK \
+    (_Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT | \
+     _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT)
+
 /* To be able to reason about code layout and branches, keep code size below 1 MB */
 #define PY_MAX_JIT_CODE_SIZE ((1 << 20)-1)
 

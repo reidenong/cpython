@@ -1443,6 +1443,19 @@ tier2_dispatch:
                 assert(raw_virtual_float_count >= raw_inputs);
                 raw_virtual_float_count += 1 - raw_inputs;
             }
+            else if (previous_opcode == _COMPARE_OP_FLOAT_VIRTUAL) {
+                int raw_inputs =
+                    ((previous_oparg &
+                      _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT) != 0) +
+                    ((previous_oparg &
+                      _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT) != 0);
+                assert(raw_virtual_float_count >= raw_inputs);
+                raw_virtual_float_count -= raw_inputs;
+            }
+            else if (previous_opcode == _TO_BOOL_FLOAT_VIRTUAL) {
+                assert(raw_virtual_float_count > 0);
+                raw_virtual_float_count--;
+            }
             else if (previous_opcode == _POP_TOP_VIRTUAL_FLOAT) {
                 assert(raw_virtual_float_count > 0);
                 raw_virtual_float_count--;

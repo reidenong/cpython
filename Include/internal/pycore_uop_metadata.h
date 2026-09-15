@@ -91,6 +91,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_UNARY_NEGATIVE_FLOAT_VIRTUAL] = HAS_ARG_FLAG | HAS_PURE_FLAG,
     [_UNARY_NOT] = 0,
     [_TO_BOOL] = HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
+    [_TO_BOOL_FLOAT_VIRTUAL] = HAS_PURE_FLAG,
     [_TO_BOOL_BOOL] = HAS_EXIT_FLAG,
     [_TO_BOOL_INT] = 0,
     [_GUARD_NOS_LIST] = HAS_EXIT_FLAG,
@@ -248,6 +249,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_STORE_ATTR_SLOT] = HAS_DEOPT_FLAG | HAS_ESCAPES_FLAG,
     [_COMPARE_OP] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ESCAPES_FLAG,
     [_COMPARE_OP_FLOAT] = HAS_ARG_FLAG,
+    [_COMPARE_OP_FLOAT_VIRTUAL] = HAS_ARG_FLAG | HAS_PURE_FLAG,
     [_COMPARE_OP_INT] = HAS_ARG_FLAG,
     [_COMPARE_OP_STR] = HAS_ARG_FLAG,
     [_IS_OP] = HAS_ARG_FLAG,
@@ -955,6 +957,15 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { 1, 1, _TO_BOOL_r11 },
             { -1, -1, -1 },
             { -1, -1, -1 },
+        },
+    },
+    [_TO_BOOL_FLOAT_VIRTUAL] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 1, 0, _TO_BOOL_FLOAT_VIRTUAL_r01 },
+            { 1, 1, _TO_BOOL_FLOAT_VIRTUAL_r11 },
+            { 2, 2, _TO_BOOL_FLOAT_VIRTUAL_r22 },
+            { 3, 3, _TO_BOOL_FLOAT_VIRTUAL_r33 },
         },
     },
     [_TO_BOOL_BOOL] = {
@@ -2367,6 +2378,15 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { 3, 0, _COMPARE_OP_FLOAT_r03 },
             { 3, 1, _COMPARE_OP_FLOAT_r13 },
             { 3, 2, _COMPARE_OP_FLOAT_r23 },
+            { -1, -1, -1 },
+        },
+    },
+    [_COMPARE_OP_FLOAT_VIRTUAL] = {
+        .best = { 2, 2, 2, 2 },
+        .entries = {
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { 3, 2, _COMPARE_OP_FLOAT_VIRTUAL_r23 },
             { -1, -1, -1 },
         },
     },
@@ -4143,6 +4163,10 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_UNARY_NOT_r22] = _UNARY_NOT,
     [_UNARY_NOT_r33] = _UNARY_NOT,
     [_TO_BOOL_r11] = _TO_BOOL,
+    [_TO_BOOL_FLOAT_VIRTUAL_r01] = _TO_BOOL_FLOAT_VIRTUAL,
+    [_TO_BOOL_FLOAT_VIRTUAL_r11] = _TO_BOOL_FLOAT_VIRTUAL,
+    [_TO_BOOL_FLOAT_VIRTUAL_r22] = _TO_BOOL_FLOAT_VIRTUAL,
+    [_TO_BOOL_FLOAT_VIRTUAL_r33] = _TO_BOOL_FLOAT_VIRTUAL,
     [_TO_BOOL_BOOL_r01] = _TO_BOOL_BOOL,
     [_TO_BOOL_BOOL_r11] = _TO_BOOL_BOOL,
     [_TO_BOOL_BOOL_r22] = _TO_BOOL_BOOL,
@@ -4497,6 +4521,7 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_COMPARE_OP_FLOAT_r03] = _COMPARE_OP_FLOAT,
     [_COMPARE_OP_FLOAT_r13] = _COMPARE_OP_FLOAT,
     [_COMPARE_OP_FLOAT_r23] = _COMPARE_OP_FLOAT,
+    [_COMPARE_OP_FLOAT_VIRTUAL_r23] = _COMPARE_OP_FLOAT_VIRTUAL,
     [_COMPARE_OP_INT_r23] = _COMPARE_OP_INT,
     [_COMPARE_OP_STR_r23] = _COMPARE_OP_STR,
     [_IS_OP_r03] = _IS_OP,
@@ -5225,6 +5250,8 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_COMPARE_OP_FLOAT_r03] = "_COMPARE_OP_FLOAT_r03",
     [_COMPARE_OP_FLOAT_r13] = "_COMPARE_OP_FLOAT_r13",
     [_COMPARE_OP_FLOAT_r23] = "_COMPARE_OP_FLOAT_r23",
+    [_COMPARE_OP_FLOAT_VIRTUAL] = "_COMPARE_OP_FLOAT_VIRTUAL",
+    [_COMPARE_OP_FLOAT_VIRTUAL_r23] = "_COMPARE_OP_FLOAT_VIRTUAL_r23",
     [_COMPARE_OP_INT] = "_COMPARE_OP_INT",
     [_COMPARE_OP_INT_r23] = "_COMPARE_OP_INT_r23",
     [_COMPARE_OP_STR] = "_COMPARE_OP_STR",
@@ -6231,6 +6258,11 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_TO_BOOL_BOOL_r11] = "_TO_BOOL_BOOL_r11",
     [_TO_BOOL_BOOL_r22] = "_TO_BOOL_BOOL_r22",
     [_TO_BOOL_BOOL_r33] = "_TO_BOOL_BOOL_r33",
+    [_TO_BOOL_FLOAT_VIRTUAL] = "_TO_BOOL_FLOAT_VIRTUAL",
+    [_TO_BOOL_FLOAT_VIRTUAL_r01] = "_TO_BOOL_FLOAT_VIRTUAL_r01",
+    [_TO_BOOL_FLOAT_VIRTUAL_r11] = "_TO_BOOL_FLOAT_VIRTUAL_r11",
+    [_TO_BOOL_FLOAT_VIRTUAL_r22] = "_TO_BOOL_FLOAT_VIRTUAL_r22",
+    [_TO_BOOL_FLOAT_VIRTUAL_r33] = "_TO_BOOL_FLOAT_VIRTUAL_r33",
     [_TO_BOOL_INT] = "_TO_BOOL_INT",
     [_TO_BOOL_INT_r02] = "_TO_BOOL_INT_r02",
     [_TO_BOOL_INT_r12] = "_TO_BOOL_INT_r12",
@@ -6403,6 +6435,8 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _UNARY_NOT:
             return 1;
         case _TO_BOOL:
+            return 1;
+        case _TO_BOOL_FLOAT_VIRTUAL:
             return 1;
         case _TO_BOOL_BOOL:
             return 0;
@@ -6717,6 +6751,8 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _COMPARE_OP:
             return 2;
         case _COMPARE_OP_FLOAT:
+            return 2;
+        case _COMPARE_OP_FLOAT_VIRTUAL:
             return 2;
         case _COMPARE_OP_INT:
             return 2;

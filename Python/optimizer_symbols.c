@@ -2491,6 +2491,75 @@ _Py_uop_virtualization_test(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignor
         }
     }
 
+    /* Float comparisons use the ordinary COMPARE_OP argument in bits 0-7,
+     * plus two representation bits above it.  The uop always emits a bool and
+     * two cleanup values; a raw input's cleanup value is NULL so the following
+     * decref operation is optimized away without touching raw bits. */
+    TEST_PREDICATE(
+        (_Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_MASK & UINT8_MAX) == 0,
+        "virtual-float comparison representation bits overlap COMPARE_OP"
+    );
+    TEST_PREDICATE(
+        _PyUop_Flags[_COMPARE_OP_FLOAT_VIRTUAL] ==
+            (HAS_ARG_FLAG | HAS_PURE_FLAG),
+        "virtual-float comparison unexpectedly exits or escapes"
+    );
+    TEST_PREDICATE(
+        _PyUop_num_popped(_COMPARE_OP_FLOAT_VIRTUAL, 0) == 2,
+        "virtual-float comparison has the wrong input stack effect"
+    );
+    for (int incoming = 0; incoming <= MAX_CACHED_REGISTER; incoming++) {
+        int depth = _PyUop_Caching[_COMPARE_OP_FLOAT_VIRTUAL].best[incoming];
+        TEST_PREDICATE(
+            depth == 2,
+            "virtual-float comparison selected an invalid cache depth"
+        );
+        const _PyUopTOSentry *entry =
+            &_PyUop_Caching[_COMPARE_OP_FLOAT_VIRTUAL].entries[depth];
+        TEST_PREDICATE(
+            entry->output == 3 && entry->exit == depth &&
+                entry->opcode == _COMPARE_OP_FLOAT_VIRTUAL_r23,
+            "virtual-float comparison has an invalid register-cache form"
+        );
+        TEST_PREDICATE(
+            _PyUop_Uncached[entry->opcode] == _COMPARE_OP_FLOAT_VIRTUAL,
+            "virtual-float comparison cache form has an invalid base uop"
+        );
+    }
+
+    /* Truth testing replaces one raw value with one bool.  Unlike
+     * materialization it cannot fail, so cached references below the raw value
+     * stay cached and every incoming depth has its own generated form. */
+    static const int truth_outputs[MAX_CACHED_REGISTER + 1] = {1, 1, 2, 3};
+    static const int truth_opcodes[MAX_CACHED_REGISTER + 1] = {
+        _TO_BOOL_FLOAT_VIRTUAL_r01,
+        _TO_BOOL_FLOAT_VIRTUAL_r11,
+        _TO_BOOL_FLOAT_VIRTUAL_r22,
+        _TO_BOOL_FLOAT_VIRTUAL_r33,
+    };
+    TEST_PREDICATE(
+        _PyUop_Flags[_TO_BOOL_FLOAT_VIRTUAL] == HAS_PURE_FLAG,
+        "virtual-float truth test unexpectedly exits or escapes"
+    );
+    TEST_PREDICATE(
+        _PyUop_num_popped(_TO_BOOL_FLOAT_VIRTUAL, 0) == 1,
+        "virtual-float truth test has the wrong input stack effect"
+    );
+    for (int depth = 0; depth <= MAX_CACHED_REGISTER; depth++) {
+        const _PyUopTOSentry *entry =
+            &_PyUop_Caching[_TO_BOOL_FLOAT_VIRTUAL].entries[depth];
+        TEST_PREDICATE(
+            entry->output == truth_outputs[depth] &&
+                entry->exit == depth &&
+                entry->opcode == truth_opcodes[depth],
+            "virtual-float truth test has an invalid register-cache form"
+        );
+        TEST_PREDICATE(
+            _PyUop_Uncached[entry->opcode] == _TO_BOOL_FLOAT_VIRTUAL,
+            "virtual-float truth cache form has an invalid base uop"
+        );
+    }
+
     TEST_PREDICATE(
         _PyUop_Flags[_UNARY_NEGATIVE_FLOAT_VIRTUAL] ==
             (HAS_ARG_FLAG | HAS_PURE_FLAG),

@@ -549,6 +549,15 @@ dummy_func(
             res = err ? PyStackRef_True : PyStackRef_False;
         }
 
+        tier2 pure op(_TO_BOOL_FLOAT_VIRTUAL, (value -- res)) {
+            /* Exact-float truth testing is simply value != 0.0.  This makes
+             * both signs of zero false and NaNs true, matching float_bool(). */
+            double dval = _PyJIT_UnpackRawDouble(value);
+            STAT_INC(TO_BOOL, hit);
+            res = dval != 0.0 ? PyStackRef_True : PyStackRef_False;
+            DEAD(value);
+        }
+
         macro(TO_BOOL) = _SPECIALIZE_TO_BOOL + unused/2 + _TO_BOOL;
 
         inst(TO_BOOL_BOOL, (unused/1, unused/2, value -- value)) {
@@ -3376,6 +3385,38 @@ dummy_func(
             DEAD(right);
             res = (sign_ish & oparg) ? PyStackRef_True : PyStackRef_False;
             // It's always a bool, so we don't care about oparg & 16.
+        }
+
+        tier2 pure op(_COMPARE_OP_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
+            bool left_is_raw =
+                (oparg & _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT) != 0;
+            bool right_is_raw =
+                (oparg & _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
+            double dleft;
+            double dright;
+            if (left_is_raw) {
+                dleft = _PyJIT_UnpackRawDouble(left);
+            }
+            else {
+                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+                assert(PyFloat_CheckExact(left_o));
+                dleft = PyFloat_AS_DOUBLE(left_o);
+            }
+            if (right_is_raw) {
+                dright = _PyJIT_UnpackRawDouble(right);
+            }
+            else {
+                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
+                assert(PyFloat_CheckExact(right_o));
+                dright = PyFloat_AS_DOUBLE(right_o);
+            }
+
+            STAT_INC(COMPARE_OP, hit);
+            int sign_ish = COMPARISON_BIT(dleft, dright);
+            l = left_is_raw ? PyStackRef_NULL : left;
+            r = right_is_raw ? PyStackRef_NULL : right;
+            INPUTS_DEAD();
+            res = (sign_ish & oparg) ? PyStackRef_True : PyStackRef_False;
         }
 
         // Similar to COMPARE_OP_FLOAT

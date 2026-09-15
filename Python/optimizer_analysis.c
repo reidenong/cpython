@@ -346,6 +346,10 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL:
         case _UNARY_NEGATIVE:
         case _UNARY_NEGATIVE_FLOAT_VIRTUAL:
+        case _TO_BOOL:
+        case _TO_BOOL_FLOAT_VIRTUAL:
+        case _COMPARE_OP_FLOAT:
+        case _COMPARE_OP_FLOAT_VIRTUAL:
         case _POP_TOP:
         case _POP_TOP_OPARG:
         case _POP_TOP_VIRTUAL_FLOAT:

@@ -4256,6 +4256,182 @@ class TestUopsOptimization(unittest.TestCase):
                 # giving stable spellings for infinities and NaNs.
                 self.assertEqual(result.hex(), expected.hex())
 
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_comparison_raw_operands(self):
+        def testfunc(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = (a * b) <= (a * b)
+            return result
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertIs(res, True)
+        self.assertIsNotNone(ex)
+        compares = [
+            op for op in get_ops(ex)
+            if op[0] == "_COMPARE_OP_FLOAT_VIRTUAL"
+        ]
+        self.assertEqual(len(compares), 1)
+        raw_mask = (1 << 8) | (1 << 9)
+        self.assertEqual(compares[0][1] & raw_mask, raw_mask)
+        self.assertEqual(
+            count_ops(ex, "_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL"), 2)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 0)
+        self.assertNotIn("_COMPARE_OP_FLOAT", get_opnames(ex))
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_comparison_mixed_operands(self):
+        def virtual_left(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b < 7.0
+            return result
+
+        def virtual_right(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = 1.0 < a * b
+            return result
+
+        args = (2.0, 3.0, TIER2_THRESHOLD)
+        for func, expected_mask in (
+            (virtual_left, 1 << 8),
+            (virtual_right, 1 << 9),
+        ):
+            with self.subTest(expected_mask=expected_mask):
+                res, ex = self._run_with_optimizer(func, args)
+                self.assertIs(res, True)
+                self.assertIsNotNone(ex)
+                compares = [
+                    op for op in get_ops(ex)
+                    if op[0] == "_COMPARE_OP_FLOAT_VIRTUAL"
+                ]
+                self.assertEqual(len(compares), 1)
+                raw_mask = (1 << 8) | (1 << 9)
+                self.assertEqual(compares[0][1] & raw_mask, expected_mask)
+                self.assertEqual(
+                    count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 0)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_comparison_masks_and_nan(self):
+        def lt(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b < 7.0
+            return result
+
+        def le(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b <= 7.0
+            return result
+
+        def eq(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b == 7.0
+            return result
+
+        def ne(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b != 7.0
+            return result
+
+        def gt(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b > 7.0
+            return result
+
+        def ge(args):
+            a, b, n = args
+            result = False
+            for _ in range(n):
+                result = a * b >= 7.0
+            return result
+
+        cases = (
+            (lt, True, False),
+            (le, True, False),
+            (eq, False, False),
+            (ne, True, True),
+            (gt, False, False),
+            (ge, False, False),
+        )
+        for func, finite_expected, nan_expected in cases:
+            with self.subTest(op=func.__name__):
+                res, ex = self._run_with_optimizer(
+                    func, (2.0, 3.0, TIER2_THRESHOLD))
+                self.assertIs(res, finite_expected)
+                self.assertIsNotNone(ex)
+                self.assertEqual(
+                    count_ops(ex, "_COMPARE_OP_FLOAT_VIRTUAL"), 1)
+                self.assertEqual(
+                    count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 0)
+                self.assertIs(func((float("nan"), 1.0, 2)), nan_expected)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_truthiness(self):
+        def testfunc(args):
+            a, b, n = args
+            count = 0
+            for _ in range(n):
+                if a * b:
+                    count += 1
+            return count
+
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, TIER2_THRESHOLD))
+        self.assertEqual(res, TIER2_THRESHOLD)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL", uops)
+        self.assertIn("_TO_BOOL_FLOAT_VIRTUAL", uops)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 0)
+        self.assertNotIn("_TO_BOOL", uops)
+
+        for a, expected in (
+            (0.0, 0),
+            (-0.0, 0),
+            (float("nan"), 2),
+        ):
+            with self.subTest(a=a):
+                self.assertEqual(testfunc((a, 1.0, 2)), expected)
+
     def test_float_virtual_result_materializes_before_unknown_guard(self):
         def testfunc(args):
             a, b, total, n = args

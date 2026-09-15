@@ -407,11 +407,27 @@
             JitOptRef value;
             JitOptRef res;
             value = stack_pointer[-1];
-            int already_bool = optimize_to_bool(this_instr, ctx, value, &res,
-                _POP_TOP, _NOP);
-            if (!already_bool) {
+            if (_Py_uop_alloc_is_virtual(ctx, value)) {
+                ADD_OP(_TO_BOOL_FLOAT_VIRTUAL, 0, 0);
                 res = sym_new_truthiness(ctx, value, true);
             }
+            else {
+                int already_bool = optimize_to_bool(this_instr, ctx, value, &res,
+                    _POP_TOP, _NOP);
+                if (!already_bool) {
+                    res = sym_new_truthiness(ctx, value, true);
+                }
+            }
+            stack_pointer[-1] = res;
+            break;
+        }
+
+        case _TO_BOOL_FLOAT_VIRTUAL: {
+            JitOptRef value;
+            JitOptRef res;
+            value = stack_pointer[-1];
+            assert(_Py_uop_alloc_is_virtual(ctx, value));
+            res = sym_new_truthiness(ctx, value, true);
             stack_pointer[-1] = res;
             break;
         }
@@ -3276,6 +3292,8 @@
             JitOptRef r;
             right = stack_pointer[-1];
             left = stack_pointer[-2];
+            bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
+            bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
             int cmp_mask = oparg & (COMPARE_LT_MASK | COMPARE_GT_MASK | COMPARE_EQ_MASK);
             if (cmp_mask == COMPARE_EQ_MASK) {
                 res = sym_new_predicate(ctx, left, right, JIT_PRED_EQ);
@@ -3286,49 +3304,98 @@
             else {
                 res = sym_new_type(ctx, &PyBool_Type);
             }
-            l = left;
-            r = right;
-            if (
-                sym_is_safe_const(ctx, left) &&
-                sym_is_safe_const(ctx, right)
-            ) {
-                JitOptRef left_sym = left;
-                JitOptRef right_sym = right;
-                _PyStackRef left = sym_get_const_as_stackref(ctx, left_sym);
-                _PyStackRef right = sym_get_const_as_stackref(ctx, right_sym);
-                _PyStackRef res_stackref;
-                _PyStackRef l_stackref;
-                _PyStackRef r_stackref;
-                /* Start of uop copied from bytecodes for constant evaluation */
-                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
-                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
-                STAT_INC(COMPARE_OP, hit);
-                double dleft = PyFloat_AS_DOUBLE(left_o);
-                double dright = PyFloat_AS_DOUBLE(right_o);
-                int sign_ish = COMPARISON_BIT(dleft, dright);
-                l_stackref = left;
-                r_stackref = right;
-                res_stackref = (sign_ish & oparg) ? PyStackRef_True : PyStackRef_False;
-                /* End of uop copied from bytecodes for constant evaluation */
-                (void)l_stackref;
-                (void)r_stackref;
-                res = sym_new_const_steal(ctx, PyStackRef_AsPyObjectSteal(res_stackref));
-                if (sym_is_const(ctx, res)) {
-                    PyObject *result = sym_get_const(ctx, res);
-                    if (_Py_IsImmortal(result)) {
-                        // Replace with _LOAD_CONST_INLINE_BORROW + _RROT_3 since we have two inputs and an immortal result
-                        ADD_OP(_LOAD_CONST_INLINE_BORROW, 0, (uintptr_t)result);
-                        ADD_OP(_RROT_3, 0, 0);
-                    }
-                }
-                CHECK_STACK_BOUNDS(1);
-                stack_pointer[-2] = res;
-                stack_pointer[-1] = l;
-                stack_pointer[0] = r;
-                stack_pointer += 1;
-                ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-                break;
+            if (left_virtual || right_virtual) {
+                int virtual_mask =
+                (left_virtual
+                 ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT : 0) |
+                (right_virtual
+                 ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT : 0);
+                ADD_OP(_COMPARE_OP_FLOAT_VIRTUAL, oparg | virtual_mask, 0);
+                l = left_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : left;
+                r = right_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : right;
             }
+            else {
+                l = left;
+                r = right;
+                if (
+                    sym_is_safe_const(ctx, left) &&
+                    sym_is_safe_const(ctx, right)
+                ) {
+                    JitOptRef left_sym = left;
+                    JitOptRef right_sym = right;
+                    _PyStackRef left = sym_get_const_as_stackref(ctx, left_sym);
+                    _PyStackRef right = sym_get_const_as_stackref(ctx, right_sym);
+                    _PyStackRef res_stackref;
+                    _PyStackRef l_stackref;
+                    _PyStackRef r_stackref;
+                    /* Start of uop copied from bytecodes for constant evaluation */
+                    PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+                    PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
+                    STAT_INC(COMPARE_OP, hit);
+                    double dleft = PyFloat_AS_DOUBLE(left_o);
+                    double dright = PyFloat_AS_DOUBLE(right_o);
+                    int sign_ish = COMPARISON_BIT(dleft, dright);
+                    l_stackref = left;
+                    r_stackref = right;
+                    res_stackref = (sign_ish & oparg) ? PyStackRef_True : PyStackRef_False;
+                    /* End of uop copied from bytecodes for constant evaluation */
+                    (void)l_stackref;
+                    (void)r_stackref;
+                    res = sym_new_const_steal(ctx, PyStackRef_AsPyObjectSteal(res_stackref));
+                    if (sym_is_const(ctx, res)) {
+                        PyObject *result = sym_get_const(ctx, res);
+                        if (_Py_IsImmortal(result)) {
+                            // Replace with _LOAD_CONST_INLINE_BORROW + _RROT_3 since we have two inputs and an immortal result
+                            ADD_OP(_LOAD_CONST_INLINE_BORROW, 0, (uintptr_t)result);
+                            ADD_OP(_RROT_3, 0, 0);
+                        }
+                    }
+                    CHECK_STACK_BOUNDS(1);
+                    stack_pointer[-2] = res;
+                    stack_pointer[-1] = l;
+                    stack_pointer[0] = r;
+                    stack_pointer += 1;
+                    ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                    break;
+                }
+            }
+            CHECK_STACK_BOUNDS(1);
+            stack_pointer[-2] = res;
+            stack_pointer[-1] = l;
+            stack_pointer[0] = r;
+            stack_pointer += 1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            break;
+        }
+
+        case _COMPARE_OP_FLOAT_VIRTUAL: {
+            JitOptRef right;
+            JitOptRef left;
+            JitOptRef res;
+            JitOptRef l;
+            JitOptRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
+            bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
+            int virtual_mask =
+            (left_virtual ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT : 0) |
+            (right_virtual ? _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_RIGHT : 0);
+            assert((oparg & _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_MASK) ==
+               virtual_mask);
+            int cmp_mask = oparg &
+            (COMPARE_LT_MASK | COMPARE_GT_MASK | COMPARE_EQ_MASK);
+            if (cmp_mask == COMPARE_EQ_MASK) {
+                res = sym_new_predicate(ctx, left, right, JIT_PRED_EQ);
+            }
+            else if (cmp_mask == (COMPARE_LT_MASK | COMPARE_GT_MASK)) {
+                res = sym_new_predicate(ctx, left, right, JIT_PRED_NE);
+            }
+            else {
+                res = sym_new_type(ctx, &PyBool_Type);
+            }
+            l = left_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : left;
+            r = right_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : right;
             CHECK_STACK_BOUNDS(1);
             stack_pointer[-2] = res;
             stack_pointer[-1] = l;
