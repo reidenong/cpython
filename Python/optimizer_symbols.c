@@ -2450,6 +2450,19 @@ _Py_uop_virtualization_test(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignor
             output_bits == input_bits,
             "unpacking a raw double changed its bit pattern"
         );
+
+        _PyStackRef negated = _PyJIT_NegateRawDouble(carrier);
+        uint64_t negated_bits;
+        memcpy(&negated_bits, &negated, sizeof(negated_bits));
+        TEST_PREDICATE(
+            negated_bits == (input_bits ^ (UINT64_C(1) << 63)),
+            "negating a raw double did not toggle exactly its sign bit"
+        );
+        _PyStackRef restored = _PyJIT_NegateRawDouble(negated);
+        TEST_PREDICATE(
+            memcmp(&restored, &carrier, sizeof(carrier)) == 0,
+            "negating a raw double twice changed its bit pattern"
+        );
     }
 #endif
 

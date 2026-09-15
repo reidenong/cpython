@@ -499,17 +499,21 @@ dummy_func(
         tier2 pure op(_UNARY_NEGATIVE_FLOAT_VIRTUAL, (value -- res, v)) {
             bool value_is_raw =
                 (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
-            double dval;
+            _PyStackRef raw_value;
             if (value_is_raw) {
-                dval = _PyJIT_UnpackRawDouble(value);
+                raw_value = value;
             }
             else {
                 PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
                 assert(PyFloat_CheckExact(value_o));
-                dval = ((PyFloatObject *)value_o)->ob_fval;
+                raw_value = _PyJIT_PackRawDouble(
+                    ((PyFloatObject *)value_o)->ob_fval);
             }
             STAT_INC(UNARY_NEGATIVE, hit);
-            res = _PyJIT_PackRawDouble(-dval);
+            /* IEEE-754 negation is an exact sign-bit toggle.  Doing it on the
+             * raw carrier avoids a native-stencil local constant pool while
+             * preserving signed zero and every NaN payload bit. */
+            res = _PyJIT_NegateRawDouble(raw_value);
             v = value_is_raw ? PyStackRef_NULL : value;
             INPUTS_DEAD();
         }

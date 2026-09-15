@@ -4432,6 +4432,52 @@ class TestUopsOptimization(unittest.TestCase):
             with self.subTest(a=a):
                 self.assertEqual(testfunc((a, 1.0, 2)), expected)
 
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_backend_stress(self):
+        def testfunc(args):
+            a, b, n = args
+            count = 0
+            for _ in range(n):
+                a * b
+                if -((a * b) + (a * b)) < (a * b) - (a * b):
+                    count += 1
+                if a * b:
+                    count += 1
+            return count
+
+        expected_uops = {
+            "_BINARY_OP_ADD_FLOAT_VIRTUAL",
+            "_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL",
+            "_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL",
+            "_COMPARE_OP_FLOAT_VIRTUAL",
+            "_POP_TOP_VIRTUAL_FLOAT",
+            "_TO_BOOL_FLOAT_VIRTUAL",
+            "_UNARY_NEGATIVE_FLOAT_VIRTUAL",
+        }
+        # Rebuilding and destroying the executor exercises the same generated
+        # uop cases under both the interpreter and copy-and-patch backends.
+        for cycle in range(10):
+            with self.subTest(cycle=cycle):
+                reset_code(testfunc)
+                result = testfunc((2.0, 3.0, TIER2_THRESHOLD))
+                self.assertEqual(result, 2 * TIER2_THRESHOLD)
+                ex = get_first_executor(testfunc)
+                self.assertIsNotNone(ex)
+                uops = set(get_opnames(ex))
+                self.assertLessEqual(expected_uops, uops)
+                self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+
+                # Exercise the installed executor with signed zero and NaN.
+                self.assertEqual(testfunc((-0.0, 1.0, 10)), 0)
+                self.assertEqual(testfunc((float("nan"), 1.0, 10)), 10)
+        reset_code(testfunc)
+
     def test_float_virtual_result_materializes_before_unknown_guard(self):
         def testfunc(args):
             a, b, total, n = args

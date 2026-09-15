@@ -723,6 +723,7 @@ NON_ESCAPING_FUNCTIONS = (
     "PyStackRef_Unwrap",
     "_PyLong_CheckExactAndCompact",
     "_PyExecutor_FromExit",
+    "_PyJIT_NegateRawDouble",
     "_PyJIT_PackRawDouble",
     "_PyJIT_UnpackRawDouble",
     "_Py_uop_alloc_is_virtual",

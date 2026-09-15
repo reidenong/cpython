@@ -10,6 +10,7 @@ extern "C" {
 #include "pycore_stackref.h"
 
 #include <float.h>   // DBL_MANT_DIG
+#include <stdint.h>  // uint64_t
 #include <string.h>  // memcpy()
 
 #ifndef Py_BUILD_CORE
@@ -48,6 +49,16 @@ _PyJIT_UnpackRawDouble(_PyStackRef value)
     memcpy(&result, &value, sizeof(result));
     return result;
 }
+
+static inline _PyStackRef
+_PyJIT_NegateRawDouble(_PyStackRef value)
+{
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    bits ^= UINT64_C(1) << 63;
+    memcpy(&value, &bits, sizeof(bits));
+    return value;
+}
 #else
 #  define _Py_JIT_RAW_DOUBLE_SUPPORTED 0
 
@@ -62,6 +73,13 @@ _PyJIT_PackRawDouble(double value)
 
 static inline double
 _PyJIT_UnpackRawDouble(_PyStackRef value)
+{
+    (void)value;
+    Py_UNREACHABLE();
+}
+
+static inline _PyStackRef
+_PyJIT_NegateRawDouble(_PyStackRef value)
 {
     (void)value;
     Py_UNREACHABLE();
