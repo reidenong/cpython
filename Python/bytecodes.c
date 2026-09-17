@@ -331,6 +331,75 @@ dummy_func(
             trash = tmp;
         }
 
+        /* Virtual fast locals live in a per-thread shadow table while the
+         * corresponding frame slot remains NULL.  These Tier-2-only uops move
+         * raw doubles between that table and the opaque stack carrier. */
+        tier2 op(_LOAD_FAST_VIRTUAL_FLOAT, (-- value)) {
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            /* Recreate the opaque stack carrier from the shadow double.  This
+             * is a bit copy, not a Python allocation or reference operation. */
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+        }
+
+        tier2 op(_LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT, (-- value)) {
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
+            if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
+                tstate_impl->jit_virtual_fast_locals.frame = NULL;
+            }
+        }
+
+        tier2 op(_SWAP_FAST_VIRTUAL_FLOAT, (value -- trash)) {
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+
+            if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) == 0) {
+                /* The optimizer only emits this uop when the old value is
+                 * NULL or an exact float.  Closing that old value cannot run
+                 * arbitrary Python while the new value is still unboxed. */
+                _PyStackRef old = GETLOCAL(oparg);
+                assert(PyStackRef_IsNull(old) ||
+                       PyFloat_CheckExact(PyStackRef_AsPyObjectBorrow(old)));
+                GETLOCAL(oparg) = PyStackRef_NULL;
+                if (!PyStackRef_IsNull(old)) {
+                    PyStackRef_CLOSE_SPECIALIZED(old, _PyFloat_ExactDealloc);
+                }
+            }
+            else {
+                assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            }
+
+            tstate_impl->jit_virtual_fast_locals.frame = frame;
+            tstate_impl->jit_virtual_fast_locals.values[oparg] =
+                _PyJIT_UnpackRawDouble(value);
+            tstate_impl->jit_virtual_fast_locals.valid_mask |= bit;
+            DEAD(value);
+            /* STORE_FAST's following POP_TOP must see no old Python object;
+             * the old boxed float was closed above or the old shadow value
+             * was overwritten without owning a reference. */
+            trash = PyStackRef_NULL;
+        }
+
+        tier2 op(_MATERIALIZE_VIRTUAL_FAST_LOCAL, (--)) {
+            /* Used before Python-visible escapes.  Ordinary guards do not
+             * need this on their hot path: the Tier-2 exit code reconstructs
+             * every shadow local only when a guard actually fails. */
+            int err = _PyJIT_MaterializeVirtualFastLocal(tstate, oparg);
+            ERROR_IF(err < 0);
+        }
+
         pseudo(STORE_FAST_MAYBE_NULL, (unused --)) = {
             STORE_FAST,
         };
@@ -496,6 +565,8 @@ dummy_func(
             INPUTS_DEAD();
         }
 
+        /* Negation toggles the raw payload's sign bit.  A boxed input is first
+         * read as a double and remains in v for the following cleanup uop. */
         tier2 pure op(_UNARY_NEGATIVE_FLOAT_VIRTUAL, (value -- res, v)) {
             bool value_is_raw =
                 (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
@@ -853,34 +924,56 @@ dummy_func(
             INPUTS_DEAD();
         }
 
-        tier2 pure op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
-            bool left_is_raw =
-                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
-            bool right_is_raw =
-                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
-            double left_value;
-            double right_value;
-            if (left_is_raw) {
-                left_value = _PyJIT_UnpackRawDouble(left);
-            }
-            else {
-                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
-                assert(PyFloat_CheckExact(left_o));
-                left_value = ((PyFloatObject *)left_o)->ob_fval;
-            }
-            if (right_is_raw) {
-                right_value = _PyJIT_UnpackRawDouble(right);
-            }
-            else {
-                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
-                assert(PyFloat_CheckExact(right_o));
-                right_value = ((PyFloatObject *)right_o)->ob_fval;
-            }
+        /* Virtual multiply omits PyFloat_FromDouble entirely: the result stays
+         * as raw IEEE-754 bits in a stack slot until a consumer needs a box.
+         * The optimizer knows each operand's representation.  Separate uops
+         * keep that compile-time fact out of the interpreter's hot path: no
+         * representation tests or redundant float assertions are needed. */
+        tier2 pure op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED,
+                      (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_o->ob_fval);
+            l = left;
+            r = right;
+            INPUTS_DEAD();
+        }
 
+        tier2 pure op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED,
+                      (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            INPUTS_DEAD();
+        }
+
+        tier2 pure op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW,
+                      (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 pure op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW,
+                      (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
             STAT_INC(BINARY_OP, hit);
             res = _PyJIT_PackRawDouble(left_value * right_value);
-            l = left_is_raw ? PyStackRef_NULL : left;
-            r = right_is_raw ? PyStackRef_NULL : right;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
             INPUTS_DEAD();
         }
 
@@ -904,34 +997,54 @@ dummy_func(
             INPUTS_DEAD();
         }
 
-        tier2 pure op(_BINARY_OP_ADD_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
-            bool left_is_raw =
-                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
-            bool right_is_raw =
-                (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
-            double left_value;
-            double right_value;
-            if (left_is_raw) {
-                left_value = _PyJIT_UnpackRawDouble(left);
-            }
-            else {
-                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
-                assert(PyFloat_CheckExact(left_o));
-                left_value = ((PyFloatObject *)left_o)->ob_fval;
-            }
-            if (right_is_raw) {
-                right_value = _PyJIT_UnpackRawDouble(right);
-            }
-            else {
-                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
-                assert(PyFloat_CheckExact(right_o));
-                right_value = ((PyFloatObject *)right_o)->ob_fval;
-            }
+        /* Addition uses the same four representation-specialized forms as
+         * multiplication.  A boxed input is returned through l/r for normal
+         * cleanup; a raw input returns NULL because it owns no reference. */
+        tier2 pure op(_BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED,
+                      (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_o->ob_fval);
+            l = left;
+            r = right;
+            INPUTS_DEAD();
+        }
 
+        tier2 pure op(_BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED,
+                      (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            INPUTS_DEAD();
+        }
+
+        tier2 pure op(_BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW,
+                      (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 pure op(_BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW,
+                      (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
             STAT_INC(BINARY_OP, hit);
             res = _PyJIT_PackRawDouble(left_value + right_value);
-            l = left_is_raw ? PyStackRef_NULL : left;
-            r = right_is_raw ? PyStackRef_NULL : right;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
             INPUTS_DEAD();
         }
 
@@ -955,6 +1068,8 @@ dummy_func(
             INPUTS_DEAD();
         }
 
+        /* Subtraction currently shares one uop.  The optimizer records which
+         * inputs are raw in oparg so only boxed inputs reach cleanup. */
         tier2 pure op(_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
             bool left_is_raw =
                 (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
@@ -3391,6 +3506,8 @@ dummy_func(
             // It's always a bool, so we don't care about oparg & 16.
         }
 
+        /* Comparison reads either representation and produces a normal bool;
+         * unlike arithmetic, no virtual value remains afterward. */
         tier2 pure op(_COMPARE_OP_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
             bool left_is_raw =
                 (oparg & _Py_JIT_COMPARE_VIRTUAL_FLOAT_RAW_LEFT) != 0;

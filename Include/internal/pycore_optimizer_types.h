@@ -143,29 +143,41 @@ typedef union {
  * value is concrete; non-zero references identify virtual-object descriptors.
  */
 typedef enum {
+    /* The runtime slot contains an ordinary Python object reference. */
     JIT_ALLOC_CONCRETE,
+    /* The runtime slot is described by a JitVirtualObject instead. */
     JIT_ALLOC_VIRTUAL,
 } JitOptAllocationState;
 
+/* Describes which concrete Python object a virtual value would become. */
 typedef enum {
+    /* Reserved for zeroed, exhausted, or deliberately corrupted entries. */
     JIT_VIRTUAL_INVALID,
     JIT_VIRTUAL_FLOAT,
 } JitVirtualKind;
 
+/* Compact handle into JitVirtualArena.  Zero is kept as the null sentinel. */
 typedef uint16_t JitVirtualRef;
 
 #define JIT_VIRTUAL_REF_NULL ((JitVirtualRef)0)
 #define VIRTUAL_ARENA_SIZE UOP_MAX_TRACE_LENGTH
 
 typedef struct {
+    /* This expanded view is returned to callers; JitOptContext stores only
+     * the compact virtual_ref because NULL already means CONCRETE. */
     JitOptAllocationState state;
     JitVirtualRef virtual_ref;
 } JitOptAllocation;
 
+/* A descriptor records facts needed to reconstruct a virtual object.  A
+ * float needs only its kind because its raw payload remains in the Tier-2
+ * value carrying the corresponding JitOptRef. */
 typedef struct {
     uint8_t kind;
 } JitVirtualObject;
 
+/* Trace-local storage for descriptors.  It is bump-allocated alongside the
+ * symbol arena and discarded when abstract interpretation finishes. */
 typedef struct {
     int virtual_curr_number;
     int virtual_max_number;

@@ -96,6 +96,15 @@ typedef struct _JitOptContext {
     bool virtual_floats_enabled;
     bool retry_without_virtuals;
 
+    /*
+     * A shadow local may survive _JUMP_TO_TOP only if its virtual store is the
+     * first access to that local in the linear trace.  In that case the next
+     * iteration overwrites the old raw value before any load can observe it.
+     * This table records that simple, conservative loop-carried proof.
+     */
+    bool virtual_fast_local_accessed[_PY_JIT_MAX_VIRTUAL_FAST_LOCALS];
+    bool virtual_fast_local_loop_safe[_PY_JIT_MAX_VIRTUAL_FAST_LOCALS];
+
     /* To do -- We could make this more space efficient
      * by using a single array and growing the stack and
      * locals toward each other. */
@@ -485,6 +494,8 @@ extern PyObject *_Py_uop_sym_get_probable_value(JitOptRef sym);
 extern PyTypeObject *_Py_uop_sym_get_probable_type(JitOptRef sym);
 extern JitOptRef *_Py_uop_sym_set_stack_depth(JitOptContext *ctx, int stack_depth, JitOptRef *current_sp);
 
+/* Allocation-domain operations.  They run in parallel with the existing
+ * type/value symbol lattice without changing JitOptRef's representation. */
 extern JitOptAllocation _Py_uop_alloc_get(JitOptContext *ctx, JitOptRef ref);
 extern bool _Py_uop_alloc_is_virtual(JitOptContext *ctx, JitOptRef ref);
 extern bool _Py_uop_alloc_set_concrete(JitOptContext *ctx, JitOptRef ref);
@@ -494,6 +505,10 @@ extern JitOptRef _Py_uop_alloc_materialize_virtual_float(
     JitOptContext *ctx, JitOptRef ref);
 extern const JitVirtualObject *_Py_uop_alloc_resolve_virtual(
     JitOptContext *ctx, JitOptRef ref);
+
+/* Liveness and consistency queries cover both locals and operand stacks in
+ * every abstract inlined frame.  The stack-only count is used when deciding
+ * whether a single raw value can be materialized at a barrier. */
 extern bool _Py_uop_alloc_frame_has_virtual(
     JitOptContext *ctx,
     _Py_UOpsAbstractFrame *frame,
@@ -508,6 +523,9 @@ extern bool _Py_uop_alloc_context_has_virtual(
 extern int _Py_uop_alloc_context_virtual_count(
     JitOptContext *ctx,
     JitOptRef *current_stack_pointer);
+extern int _Py_uop_alloc_context_stack_virtual_count(
+    JitOptContext *ctx,
+    JitOptRef *current_stack_pointer);
 extern bool _Py_uop_alloc_validate_frame(
     JitOptContext *ctx,
     _Py_UOpsAbstractFrame *frame,
@@ -516,6 +534,8 @@ extern bool _Py_uop_alloc_validate_context(
     JitOptContext *ctx,
     JitOptRef *current_stack_pointer);
 
+/* Producer gate used by float transfer rules.  Unsafe traces are rejected by
+ * the optimizer's later barrier validation and retried with this gate off. */
 extern bool _Py_uop_can_virtualize_float_result(
     JitOptContext *ctx);
 
@@ -537,6 +557,7 @@ extern _Py_UOpsAbstractFrame *_Py_uop_frame_new_from_symbol(
 extern int _Py_uop_frame_pop(JitOptContext *ctx, PyCodeObject *co);
 
 PyAPI_FUNC(PyObject *) _Py_uop_symbols_test(PyObject *self, PyObject *ignored);
+/* C-level unit test for the allocation domain and raw-carrier invariants. */
 PyAPI_FUNC(PyObject *) _Py_uop_virtualization_test(
     PyObject *self, PyObject *ignored);
 

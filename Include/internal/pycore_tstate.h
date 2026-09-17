@@ -103,6 +103,23 @@ typedef struct _PyThreadStateImpl {
     Py_ssize_t reftotal;  // this thread's total refcount operations
 #endif
 #if _Py_TIER2
+    /*
+     * Raw virtual floats cannot be written to frame->localsplus: those slots
+     * must always be valid _PyStackRefs whenever Tier 1 or frame inspection
+     * can observe them.  Tier 2 therefore keeps raw values in this private,
+     * per-thread shadow table and leaves the corresponding frame slot NULL.
+     *
+     * The optimizer currently enables this only for the root frame.  Values
+     * that are not proven overwritten before their first trace access are
+     * materialized at the loop backedge; proven write-before-read values can
+     * remain here across iterations.  `frame` identifies the owning root
+     * frame; valid_mask says which entries in values[] contain live doubles.
+     */
+    struct {
+        _PyInterpreterFrame *frame;
+        uint32_t valid_mask;
+        double values[_PY_JIT_MAX_VIRTUAL_FAST_LOCALS];
+    } jit_virtual_fast_locals;
     struct _PyJitTracerState *jit_tracer_state;
 #endif
 

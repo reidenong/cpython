@@ -129,6 +129,15 @@ _Py_CODEUNIT *_PyTier2Interpreter(
     struct _PyExecutorObject *current_executor, _PyInterpreterFrame *frame,
     _PyStackRef *stack_pointer, PyThreadState *tstate
 );
+
+/* Runtime support for raw doubles kept outside the Python frame.  Reset binds
+ * an empty table to an entering executor; the materializers restore one or
+ * all shadowed locals to ordinary boxed frame slots. */
+extern void _PyJIT_ResetVirtualFastLocals(
+    PyThreadState *tstate, _PyInterpreterFrame *frame);
+extern int _PyJIT_MaterializeVirtualFastLocal(
+    PyThreadState *tstate, int local_index);
+extern int _PyJIT_MaterializeVirtualFastLocals(PyThreadState *tstate);
 #endif
 
 PyAPI_DATA(_PyJitEntryFuncPtr) _Py_jit_entry;

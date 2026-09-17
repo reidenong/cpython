@@ -33,6 +33,7 @@
 #include "pycore_range.h"
 #include "pycore_setobject.h"
 #include "pycore_sliceobject.h"
+#include "pycore_tstate.h"  // virtual-float shadow locals
 #include "pycore_stackref.h"
 #include "pycore_template.h"
 #include "pycore_tuple.h"
@@ -85,6 +86,10 @@
 #undef TIER2_TO_TIER2
 #define TIER2_TO_TIER2(EXECUTOR)                                           \
 do {                                                                       \
+    /* Tail-called executors do not share shadow-local assumptions. */      \
+    if (_PyJIT_MaterializeVirtualFastLocals(tstate) < 0) {                  \
+        GOTO_TIER_ONE(NULL);                                                \
+    }                                                                      \
     OPT_STAT_INC(traces_executed);                                         \
     _PyExecutorObject *_executor = (EXECUTOR);                             \
     jit_func_preserve_none jitted = _executor->jit_code;                   \

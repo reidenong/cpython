@@ -476,6 +476,10 @@ do {                                                   \
 
 #define TIER2_TO_TIER2(EXECUTOR) \
 do {                                                   \
+    /* A different executor was optimized from an ordinary boxed frame. */ \
+    if (_PyJIT_MaterializeVirtualFastLocals(tstate) < 0) { \
+        GOTO_TIER_ONE(NULL);                           \
+    }                                                  \
     OPT_STAT_INC(traces_executed);                     \
     current_executor = (EXECUTOR);                     \
     goto tier2_start;                                  \
@@ -489,15 +493,25 @@ do {                                                   \
 #define GOTO_TIER_ONE(TARGET) \
     do \
     { \
+        _Py_CODEUNIT *tier_one_target = (_Py_CODEUNIT *)(TARGET); \
         GOTO_TIER_ONE_SETUP \
-        return (_Py_CODEUNIT *)(TARGET); \
+        /* Tier 1 and frame observers must never see raw shadow locals. */ \
+        if (_PyJIT_MaterializeVirtualFastLocals(tstate) < 0) { \
+            tier_one_target = NULL; \
+        } \
+        return tier_one_target; \
     } while (0)
 
 #define GOTO_TIER_ONE_CONTINUE_TRACING(TARGET) \
     do \
     { \
+        _Py_CODEUNIT *tier_one_target = (_Py_CODEUNIT *)(TARGET); \
         GOTO_TIER_ONE_SETUP \
-        return (_Py_CODEUNIT *)(((uintptr_t)(TARGET))| 1); \
+        /* Tracing also observes the ordinary Python frame representation. */ \
+        if (_PyJIT_MaterializeVirtualFastLocals(tstate) < 0) { \
+            return NULL; \
+        } \
+        return (_Py_CODEUNIT *)(((uintptr_t)tier_one_target)| 1); \
     } while (0)
 
 #define CURRENT_OPARG()    (next_uop[-1].oparg)

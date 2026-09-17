@@ -43,6 +43,14 @@ typedef struct _PyUOpInstruction{
 #define UOP_TRACE_BUFFER_OVERHEAD 10
 #define UOP_MAX_TRACE_LENGTH (FITNESS_INITIAL + UOP_TRACE_BUFFER_OVERHEAD)
 
+/*
+ * The first virtual-fast-locals implementation deliberately uses a small,
+ * fixed table.  A fixed limit keeps the Tier-2 hot path allocation-free and
+ * lets the valid set fit in one machine-independent bit mask.  Locals beyond
+ * this limit simply keep using ordinary boxed frame slots.
+ */
+#define _PY_JIT_MAX_VIRTUAL_FAST_LOCALS 32
+
 /* Bloom filter with m = 256
  * https://en.wikipedia.org/wiki/Bloom_filter */
 #ifdef HAVE_GCC_UINT128_T

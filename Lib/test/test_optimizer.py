@@ -85,6 +85,8 @@ class TestOptimizerSymbols(unittest.TestCase):
     def test_optimizer_symbols(self):
         _testinternalcapi.uop_symbols_test()
 
+    # The detailed virtual-object checks live in C so they can inspect the
+    # optimizer's private arenas and generated uop metadata directly.
     @unittest.skipUnless(hasattr(_testinternalcapi, "uop_virtualization_test"),
                 "requires _testinternalcapi.uop_virtualization_test")
     def test_optimizer_virtualization(self):

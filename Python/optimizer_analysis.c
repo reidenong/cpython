@@ -239,15 +239,21 @@ is_terminator_uop(const _PyUOpInstruction *uop)
     );
 }
 
+/* Any uop with one of these effects may expose the frame, branch to Tier 1,
+ * or otherwise require its operands to be real Python references. */
 #define VIRTUAL_BARRIER_FLAGS \
     (HAS_EXIT_FLAG | HAS_DEOPT_FLAG | HAS_ERROR_FLAG | \
      HAS_ESCAPES_FLAG | HAS_SYNC_SP_FLAG)
 
+/* Internal result distinct from ordinary "not ready": rerun the complete
+ * abstract interpretation pass with only boxed representations. */
 #define OPTIMIZE_RETRY_WITHOUT_VIRTUALS (-2)
 
 static bool
 is_virtualization_barrier(const _PyUOpInstruction *uop)
 {
+    /* Centralize the conservative boundary between raw-only Tier-2 values and
+     * operations that can observe normal Python object/frame semantics. */
     /* These consumers require a concrete Python object even though their
      * metadata does not describe them as exits or safepoints. */
     switch (uop->opcode) {
@@ -275,6 +281,9 @@ virtuals_cross_unsafe_barrier(
     int live_virtuals_before,
     bool live_virtuals_after)
 {
+    /* Audit the exact output slice produced for one input uop.  This catches
+     * both copied source barriers and replacement sequences emitted by an
+     * optimizer transfer rule. */
     if (live_virtuals_before < 0) {
         return true;
     }
@@ -341,9 +350,15 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _BINARY_OP_ADD_FLOAT:
         case _BINARY_OP_SUBTRACT_FLOAT:
         case _BINARY_OP_MULTIPLY_FLOAT:
-        case _BINARY_OP_ADD_FLOAT_VIRTUAL:
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED:
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED:
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW:
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW:
         case _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL:
-        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL:
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED:
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED:
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW:
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW:
         case _UNARY_NEGATIVE:
         case _UNARY_NEGATIVE_FLOAT_VIRTUAL:
         case _TO_BOOL:
@@ -354,6 +369,10 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _POP_TOP_OPARG:
         case _POP_TOP_VIRTUAL_FLOAT:
         case _MATERIALIZE_VIRTUAL_FLOAT:
+        case _MATERIALIZE_VIRTUAL_FAST_LOCAL:
+        case _LOAD_FAST_VIRTUAL_FLOAT:
+        case _LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT:
+        case _SWAP_FAST_VIRTUAL_FLOAT:
         case _SWAP_FAST:
             return true;
         default:
@@ -371,7 +390,11 @@ materialize_single_stack_virtual(
      * current frame's operand stack.  A value in a local or suspended caller,
      * an alias, or multiple raw values needs exit reconstruction and therefore
      * uses the non-virtual retry instead. */
-    if (_Py_uop_alloc_context_virtual_count(ctx, stack_pointer) != 1) {
+    int stack_virtuals = _Py_uop_alloc_context_stack_virtual_count(
+        ctx, stack_pointer);
+    int all_virtuals = _Py_uop_alloc_context_virtual_count(
+        ctx, stack_pointer);
+    if (stack_virtuals != 1 || all_virtuals != stack_virtuals) {
         return false;
     }
 
@@ -622,9 +645,9 @@ optimize_pop_top(JitOptContext *ctx, _PyUOpInstruction *this_instr, JitOptRef va
 bool
 _Py_uop_can_virtualize_float_result(JitOptContext *ctx)
 {
-    /* Stage 7 validates the actual rewritten output instead of predicting a
-     * result's consumers with bounded lookahead.  An unsafe attempt is thrown
-     * away and the complete optimizer pass is repeated without virtualization. */
+    /* Validate the actual rewritten output instead of predicting a result's
+     * consumers with bounded lookahead.  An unsafe attempt is thrown away and
+     * the complete optimizer pass is repeated without virtualization. */
     return ctx->virtual_floats_enabled;
 }
 
@@ -772,6 +795,8 @@ optimize_uops(
                          _setup_optimizer_watchers, NULL);
 
     _Py_uop_abstractcontext_init(ctx, dependencies);
+    /* Platform support and debug-stack compatibility are checked once per
+     * pass; individual producer rules can then use a cheap boolean gate. */
     ctx->virtual_floats_enabled =
         enable_virtual_floats && _Py_JIT_RAW_DOUBLE_SUPPORTED;
 #ifdef Py_DEBUG
@@ -817,9 +842,47 @@ optimize_uops(
         DUMP_UOP(ctx, "abs", (int)(this_instr - trace), this_instr, stack_pointer);
 
         _PyUOpInstruction *out_ptr = ctx->out_buffer.next;
-        int live_virtuals_before = _Py_uop_alloc_context_virtual_count(
+        /* Snapshot both stack and local liveness before rewriting this uop.
+         * The counts drive pre-barrier materialization and post-rule audits. */
+        int live_virtuals_before = _Py_uop_alloc_context_stack_virtual_count(
             ctx, stack_pointer);
 
+        int all_virtuals_before = _Py_uop_alloc_context_virtual_count(
+            ctx, stack_pointer);
+        int local_virtuals_before = all_virtuals_before < 0 ||
+            live_virtuals_before < 0
+            ? -1 : all_virtuals_before - live_virtuals_before;
+
+        /* Calls and other escaping operations may inspect the Python frame.
+         * Restore shadow locals before those operations execute.  If a raw
+         * stack value aliases a shadow local, this first implementation cannot
+         * rebuild their shared identity, so retry the trace without virtuals. */
+        if (ctx->virtual_floats_enabled && local_virtuals_before != 0 &&
+            (_PyUop_Flags[this_instr->opcode] & HAS_ESCAPES_FLAG) != 0 &&
+            !uop_handles_virtual_float(this_instr))
+        {
+            if (local_virtuals_before < 0 || live_virtuals_before != 0 ||
+                ctx->curr_frame_depth != 1)
+            {
+                ctx->retry_without_virtuals = true;
+                ctx->done = true;
+                break;
+            }
+            for (int local = 0; local < ctx->frame->locals_len &&
+                                local < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS;
+                 local++)
+            {
+                if (_Py_uop_alloc_is_virtual(ctx, ctx->frame->locals[local])) {
+                    add_op(ctx, this_instr,
+                           _MATERIALIZE_VIRTUAL_FAST_LOCAL, local, 0);
+                    ctx->frame->locals[local] =
+                        sym_new_type(ctx, &PyFloat_Type);
+                }
+            }
+        }
+
+        /* A generic barrier may proceed only after its sole unique stack
+         * virtual has been boxed.  More complex states use the safe retry. */
         if (ctx->virtual_floats_enabled && live_virtuals_before != 0 &&
             is_virtualization_barrier(this_instr) &&
             !uop_handles_virtual_float(this_instr) &&
@@ -851,8 +914,9 @@ optimize_uops(
             *(ctx->out_buffer.next++) = *this_instr;
         }
         assert(ctx->frame != NULL);
-        bool live_virtuals_after = _Py_uop_alloc_context_has_virtual(
-            ctx, stack_pointer);
+        bool live_virtuals_after =
+            _Py_uop_alloc_context_stack_virtual_count(
+                ctx, stack_pointer) != 0;
         if (ctx->virtual_floats_enabled &&
             virtuals_cross_unsafe_barrier(
                 out_ptr, ctx->out_buffer.next,
@@ -1058,6 +1122,8 @@ _Py_uop_analyze_and_optimize(
         enable_virtual_floats);
 
     if (length == OPTIMIZE_RETRY_WITHOUT_VIRTUALS) {
+        /* The first pass is speculative.  Reinitialize every abstract arena
+         * and regenerate the trace using CPython's ordinary boxed uops. */
         assert(enable_virtual_floats);
         length = optimize_uops(
             tstate, buffer, trace_length, curr_stacklen, output, dependencies,

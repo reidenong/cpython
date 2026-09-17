@@ -2249,6 +2249,194 @@
             break;
         }
 
+        case _LOAD_FAST_VIRTUAL_FLOAT_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            oparg = CURRENT_OPARG();
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            _tos_cache0 = value;
+            SET_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _LOAD_FAST_VIRTUAL_FLOAT_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            oparg = CURRENT_OPARG();
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            _tos_cache1 = value;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _LOAD_FAST_VIRTUAL_FLOAT_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            oparg = CURRENT_OPARG();
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            _tos_cache2 = value;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            oparg = CURRENT_OPARG();
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
+            if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
+                tstate_impl->jit_virtual_fast_locals.frame = NULL;
+            }
+            _tos_cache0 = value;
+            SET_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            oparg = CURRENT_OPARG();
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
+            if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
+                tstate_impl->jit_virtual_fast_locals.frame = NULL;
+            }
+            _tos_cache1 = value;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            oparg = CURRENT_OPARG();
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
+            value = _PyJIT_PackRawDouble(
+                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
+            if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
+                tstate_impl->jit_virtual_fast_locals.frame = NULL;
+            }
+            _tos_cache2 = value;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _SWAP_FAST_VIRTUAL_FLOAT_r11: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef value;
+            _PyStackRef trash;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            oparg = CURRENT_OPARG();
+            value = _stack_item_0;
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) == 0) {
+                _PyStackRef old = GETLOCAL(oparg);
+                assert(PyStackRef_IsNull(old) ||
+                       PyFloat_CheckExact(PyStackRef_AsPyObjectBorrow(old)));
+                GETLOCAL(oparg) = PyStackRef_NULL;
+                if (!PyStackRef_IsNull(old)) {
+                    PyStackRef_CLOSE_SPECIALIZED(old, _PyFloat_ExactDealloc);
+                }
+            }
+            else {
+                assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+            }
+            tstate_impl->jit_virtual_fast_locals.frame = frame;
+            tstate_impl->jit_virtual_fast_locals.values[oparg] =
+            _PyJIT_UnpackRawDouble(value);
+            tstate_impl->jit_virtual_fast_locals.valid_mask |= bit;
+            trash = PyStackRef_NULL;
+            _tos_cache0 = trash;
+            _tos_cache1 = PyStackRef_ZERO_BITS;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
+            SET_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _MATERIALIZE_VIRTUAL_FAST_LOCAL_r00: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            oparg = CURRENT_OPARG();
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            _PyFrame_StackPointerValidate(frame);
+            int err = _PyJIT_MaterializeVirtualFastLocal(tstate, oparg);
+            _PyFrame_StackPointerInvalidate(frame);
+            if (err < 0) {
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_ERROR();
+            }
+            _tos_cache0 = PyStackRef_ZERO_BITS;
+            _tos_cache1 = PyStackRef_ZERO_BITS;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
+            SET_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
         case _POP_TOP_r10: {
             CHECK_CURRENT_CACHED_VALUES(1);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
@@ -5748,7 +5936,64 @@
             break;
         }
 
-        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_r23: {
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_o->ob_fval);
+            l = left;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_o->ob_fval);
+            l = left;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED_r23: {
             CHECK_CURRENT_CACHED_VALUES(2);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
             _PyStackRef right;
@@ -5758,35 +6003,259 @@
             _PyStackRef r;
             _PyStackRef _stack_item_0 = _tos_cache0;
             _PyStackRef _stack_item_1 = _tos_cache1;
-            oparg = CURRENT_OPARG();
             right = _stack_item_1;
             left = _stack_item_0;
-            bool left_is_raw =
-            (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
-            bool right_is_raw =
-            (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
-            double left_value;
-            double right_value;
-            if (left_is_raw) {
-                left_value = _PyJIT_UnpackRawDouble(left);
-            }
-            else {
-                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
-                assert(PyFloat_CheckExact(left_o));
-                left_value = ((PyFloatObject *)left_o)->ob_fval;
-            }
-            if (right_is_raw) {
-                right_value = _PyJIT_UnpackRawDouble(right);
-            }
-            else {
-                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
-                assert(PyFloat_CheckExact(right_o));
-                right_value = ((PyFloatObject *)right_o)->ob_fval;
-            }
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_o->ob_fval);
+            l = left;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            right = _stack_item_1;
+            left = _stack_item_0;
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            right = _stack_item_1;
+            left = _stack_item_0;
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval * right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
             STAT_INC(BINARY_OP, hit);
             res = _PyJIT_PackRawDouble(left_value * right_value);
-            l = left_is_raw ? PyStackRef_NULL : left;
-            r = right_is_raw ? PyStackRef_NULL : right;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_value);
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            right = _stack_item_1;
+            left = _stack_item_0;
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value * right_value);
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
             _tos_cache2 = r;
             _tos_cache1 = l;
             _tos_cache0 = res;
@@ -5911,7 +6380,64 @@
             break;
         }
 
-        case _BINARY_OP_ADD_FLOAT_VIRTUAL_r23: {
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_o->ob_fval);
+            l = left;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_o->ob_fval);
+            l = left;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED_r23: {
             CHECK_CURRENT_CACHED_VALUES(2);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
             _PyStackRef right;
@@ -5921,35 +6447,259 @@
             _PyStackRef r;
             _PyStackRef _stack_item_0 = _tos_cache0;
             _PyStackRef _stack_item_1 = _tos_cache1;
-            oparg = CURRENT_OPARG();
             right = _stack_item_1;
             left = _stack_item_0;
-            bool left_is_raw =
-            (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0;
-            bool right_is_raw =
-            (oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0;
-            double left_value;
-            double right_value;
-            if (left_is_raw) {
-                left_value = _PyJIT_UnpackRawDouble(left);
-            }
-            else {
-                PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
-                assert(PyFloat_CheckExact(left_o));
-                left_value = ((PyFloatObject *)left_o)->ob_fval;
-            }
-            if (right_is_raw) {
-                right_value = _PyJIT_UnpackRawDouble(right);
-            }
-            else {
-                PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
-                assert(PyFloat_CheckExact(right_o));
-                right_value = ((PyFloatObject *)right_o)->ob_fval;
-            }
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_o->ob_fval);
+            l = left;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            right = _stack_item_1;
+            left = _stack_item_0;
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_o->ob_fval);
+            l = PyStackRef_NULL;
+            r = right;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            right = _stack_item_1;
+            left = _stack_item_0;
+            PyFloatObject *left_o =
+            (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_o->ob_fval + right_value);
+            l = left;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
             STAT_INC(BINARY_OP, hit);
             res = _PyJIT_PackRawDouble(left_value + right_value);
-            l = left_is_raw ? PyStackRef_NULL : left;
-            r = right_is_raw ? PyStackRef_NULL : right;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            right = _stack_item_0;
+            left = stack_pointer[-1];
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_value);
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            _tos_cache2 = r;
+            _tos_cache1 = l;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef right;
+            _PyStackRef left;
+            _PyStackRef res;
+            _PyStackRef l;
+            _PyStackRef r;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            right = _stack_item_1;
+            left = _stack_item_0;
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(left_value + right_value);
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
             _tos_cache2 = r;
             _tos_cache1 = l;
             _tos_cache0 = res;

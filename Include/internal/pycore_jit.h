@@ -35,6 +35,7 @@ extern "C" {
 static inline _PyStackRef
 _PyJIT_PackRawDouble(double value)
 {
+    /* memcpy is the alias-safe way to preserve every double payload bit. */
     static_assert(sizeof(_PyStackRef) == sizeof(value),
                   "raw float transport requires a 64-bit stack slot");
     _PyStackRef result;
@@ -45,6 +46,7 @@ _PyJIT_PackRawDouble(double value)
 static inline double
 _PyJIT_UnpackRawDouble(_PyStackRef value)
 {
+    /* Reverse the opaque carrier without interpreting it as a reference. */
     double result;
     memcpy(&result, &value, sizeof(result));
     return result;
@@ -53,6 +55,7 @@ _PyJIT_UnpackRawDouble(_PyStackRef value)
 static inline _PyStackRef
 _PyJIT_NegateRawDouble(_PyStackRef value)
 {
+    /* IEEE-754 sign-bit toggling preserves signed zero and NaN payloads. */
     uint64_t bits;
     memcpy(&bits, &value, sizeof(bits));
     bits ^= UINT64_C(1) << 63;

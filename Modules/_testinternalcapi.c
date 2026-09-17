@@ -3443,6 +3443,7 @@ static PyMethodDef module_functions[] = {
 #endif
 #ifdef _Py_TIER2
     {"uop_symbols_test", _Py_uop_symbols_test, METH_NOARGS},
+    /* Expose the allocation-domain invariant checks to test_optimizer. */
     {"uop_virtualization_test", _Py_uop_virtualization_test, METH_NOARGS},
 #endif
     GH_119213_GETARGS_METHODDEF

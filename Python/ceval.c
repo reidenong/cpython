@@ -1371,8 +1371,71 @@ _PyJitEntryFuncPtr _Py_jit_entry = _PyTier2Interpreter;
 #endif
 #endif
 
-#if defined(_Py_TIER2) && !defined(_Py_JIT)
+#ifdef _Py_TIER2
 
+void
+_PyJIT_ResetVirtualFastLocals(
+    PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    /* Associate the empty table with a new root executor.  Runtime uops use
+     * this owner to reject accidental cross-frame shadow-local access. */
+    _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+    /* Every normal Tier-2 exit materializes the table before returning.  A
+     * non-empty table here would mean raw state escaped a previous executor. */
+    assert(tstate_impl->jit_virtual_fast_locals.valid_mask == 0);
+    tstate_impl->jit_virtual_fast_locals.frame = frame;
+}
+
+int
+_PyJIT_MaterializeVirtualFastLocal(PyThreadState *tstate, int local_index)
+{
+    /* Reconstruct one exact float into its canonical frame slot.  This helper
+     * is shared by explicit materialization uops and exit reconstruction. */
+    _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+    assert(local_index >= 0);
+    assert(local_index < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+    uint32_t bit = UINT32_C(1) << local_index;
+    if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) == 0) {
+        return 0;
+    }
+
+    _PyInterpreterFrame *frame = tstate_impl->jit_virtual_fast_locals.frame;
+    assert(frame != NULL);
+    assert(PyStackRef_IsNull(frame->localsplus[local_index]));
+
+    /* Allocate before clearing the shadow bit.  If allocation fails, exit
+     * reconstruction can still see the raw value and report the MemoryError. */
+    PyObject *boxed = PyFloat_FromDouble(
+        tstate_impl->jit_virtual_fast_locals.values[local_index]);
+    if (boxed == NULL) {
+        return -1;
+    }
+    frame->localsplus[local_index] = PyStackRef_FromPyObjectSteal(boxed);
+    tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
+    if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
+        tstate_impl->jit_virtual_fast_locals.frame = NULL;
+    }
+    return 0;
+}
+
+int
+_PyJIT_MaterializeVirtualFastLocals(PyThreadState *tstate)
+{
+    /* Drain every live shadow entry before control reaches Tier 1, another
+     * executor, or any code that may inspect frame->localsplus. */
+    _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+    uint32_t mask = tstate_impl->jit_virtual_fast_locals.valid_mask;
+    for (int local_index = 0; mask != 0; local_index++, mask >>= 1) {
+        if ((mask & 1) != 0 &&
+            _PyJIT_MaterializeVirtualFastLocal(tstate, local_index) < 0)
+        {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+#ifndef _Py_JIT
 _Py_CODEUNIT *
 _PyTier2Interpreter(
     _PyExecutorObject *current_executor, _PyInterpreterFrame *frame,
@@ -1383,6 +1446,7 @@ _PyTier2Interpreter(
     /* Set up "jit" state after entry from tier 1.
      * This mimics what the jit shim function does. */
     tstate->jit_exit = NULL;
+    _PyJIT_ResetVirtualFastLocals(tstate, frame);
     _PyStackRef _tos_cache0 = PyStackRef_ZERO_BITS;
     _PyStackRef _tos_cache1 = PyStackRef_ZERO_BITS;
     _PyStackRef _tos_cache2 = PyStackRef_ZERO_BITS;
@@ -1425,12 +1489,42 @@ tier2_dispatch:
     for (;;) {
 #ifdef Py_DEBUG
         if (uopcode != UINT16_MAX) {
+            /* Track the number of opaque raw values represented by the
+             * interpreter stack/cache.  This validates each virtual uop's
+             * representation effect and protects the generic stack dumper. */
             int previous_opcode = _PyUop_Uncached[uopcode];
             int previous_oparg = next_uop[-1].oparg;
-            if (previous_opcode == _BINARY_OP_ADD_FLOAT_VIRTUAL ||
-                previous_opcode == _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL ||
-                previous_opcode == _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL)
-            {
+            if (previous_opcode ==
+                    _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED) {
+                raw_virtual_float_count++;
+            }
+            else if (previous_opcode ==
+                         _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED ||
+                     previous_opcode ==
+                         _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW) {
+                assert(raw_virtual_float_count > 0);
+            }
+            else if (previous_opcode ==
+                         _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW) {
+                assert(raw_virtual_float_count >= 2);
+                raw_virtual_float_count--;
+            }
+            else if (previous_opcode ==
+                         _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED) {
+                raw_virtual_float_count++;
+            }
+            else if (previous_opcode ==
+                         _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED ||
+                     previous_opcode ==
+                         _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW) {
+                assert(raw_virtual_float_count > 0);
+            }
+            else if (previous_opcode ==
+                         _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW) {
+                assert(raw_virtual_float_count >= 2);
+                raw_virtual_float_count--;
+            }
+            else if (previous_opcode == _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL) {
                 int raw_inputs =
                     ((previous_oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT) != 0) +
                     ((previous_oparg & _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT) != 0);
@@ -1461,6 +1555,14 @@ tier2_dispatch:
                 raw_virtual_float_count--;
             }
             else if (previous_opcode == _MATERIALIZE_VIRTUAL_FLOAT) {
+                assert(raw_virtual_float_count > 0);
+                raw_virtual_float_count--;
+            }
+            else if (previous_opcode == _LOAD_FAST_VIRTUAL_FLOAT ||
+                     previous_opcode == _LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT) {
+                raw_virtual_float_count++;
+            }
+            else if (previous_opcode == _SWAP_FAST_VIRTUAL_FLOAT) {
                 assert(raw_virtual_float_count > 0);
                 raw_virtual_float_count--;
             }
@@ -1547,6 +1649,7 @@ jump_to_jump_target:
     goto tier2_dispatch;
 
 }
+#endif // !_Py_JIT
 #endif // _Py_TIER2
 
 
