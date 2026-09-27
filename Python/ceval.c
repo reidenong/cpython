@@ -1386,6 +1386,38 @@ _PyJIT_ResetVirtualFastLocals(
     tstate_impl->jit_virtual_fast_locals.frame = frame;
 }
 
+void
+_PyJIT_StoreVirtualFastLocal(
+    PyThreadState *tstate, _PyInterpreterFrame *frame,
+    int local_index, double value)
+{
+    /* Install a raw value after the uop has proved that replacing the old
+     * local cannot invoke Python.  An arbitrary old object takes the store
+     * uop's boxed deopt path instead, before this helper is called. */
+    _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+    assert(local_index >= 0);
+    assert(local_index < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+    uint32_t bit = UINT32_C(1) << local_index;
+
+    if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0) {
+        assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+        assert(PyStackRef_IsNull(frame->localsplus[local_index]));
+        tstate_impl->jit_virtual_fast_locals.values[local_index] = value;
+        return;
+    }
+
+    _PyStackRef old = frame->localsplus[local_index];
+    assert(PyStackRef_IsNull(old) ||
+           PyFloat_CheckExact(PyStackRef_AsPyObjectBorrow(old)));
+    frame->localsplus[local_index] = PyStackRef_NULL;
+    if (!PyStackRef_IsNull(old)) {
+        PyStackRef_CLOSE_SPECIALIZED(old, _PyFloat_ExactDealloc);
+    }
+    tstate_impl->jit_virtual_fast_locals.frame = frame;
+    tstate_impl->jit_virtual_fast_locals.values[local_index] = value;
+    tstate_impl->jit_virtual_fast_locals.valid_mask |= bit;
+}
+
 int
 _PyJIT_MaterializeVirtualFastLocal(PyThreadState *tstate, int local_index)
 {

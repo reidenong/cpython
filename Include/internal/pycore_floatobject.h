@@ -41,6 +41,11 @@ extern double _Py_parse_inf_or_nan(const char *p, char **endptr);
 
 extern int _Py_convert_int_to_double(PyObject **v, double *dbl);
 
+/* Evaluate float power when the base is proven nonnegative (or NaN).  This is
+ * the allocation-free numeric core used by the virtual-float Tier-2 uop. */
+extern int _PyFloat_PowNonNegative(
+    double base, double exponent, double *result);
+
 /* Should match endianness of the platform in most (all?) cases. */
 
 #ifdef DOUBLE_IS_BIG_ENDIAN_IEEE754

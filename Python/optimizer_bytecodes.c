@@ -71,6 +71,9 @@ _Py_uop_can_virtualize_float_result(JitOptContext *ctx);
 
 extern PyCodeObject *get_code(_PyUOpInstruction *op);
 
+extern int find_unique_virtual_fast_local_alias(
+    JitOptContext *ctx, JitOptRef value);
+
 static int
 dummy_func(void) {
 
@@ -230,16 +233,12 @@ dummy_func(void) {
         }
 
         if (_Py_uop_alloc_is_virtual(ctx, stored_value)) {
-            /* A unique raw result can move into the shadow table without
-             * allocation.  Requiring the first trace access to be this store
-             * is the proof that a loop-carried shadow is overwritten before
-             * it can be read on the following iteration. */
-            bool old_is_safe_float = sym_is_null(old_value) ||
-                sym_matches_type(old_value, &PyFloat_Type) ||
-                _Py_uop_alloc_is_virtual(ctx, old_value);
-            if (PyJitRef_IsUnique(stored_value) &&
-                supported_root_local &&
-                old_is_safe_float)
+            /* A unique raw result can move into the shadow table without an
+             * allocation on the normal path.  The runtime uop also handles an
+             * unexpected old object by installing a one-iteration boxed
+             * fallback before closing it, so abstract entry locals need not
+             * already carry an exact-float type fact. */
+            if (PyJitRef_IsUnique(stored_value) && supported_root_local)
             {
                 ADD_OP(_SWAP_FAST_VIRTUAL_FLOAT, oparg, 0);
                 if (!first_access &&
@@ -279,6 +278,7 @@ dummy_func(void) {
              * local; otherwise a guard exit could overwrite the new boxed
              * value with a stale raw double. */
             if (_Py_uop_alloc_is_virtual(ctx, old_value)) {
+                _Py_uop_alloc_note_materialization(ctx, old_value);
                 ADD_OP(_MATERIALIZE_VIRTUAL_FAST_LOCAL, oparg, 0);
                 old_value = sym_new_type(ctx, &PyFloat_Type);
             }
@@ -308,12 +308,26 @@ dummy_func(void) {
 
     op(_MATERIALIZE_VIRTUAL_FAST_LOCAL, (--)) {
         if (_Py_uop_alloc_is_virtual(ctx, GETLOCAL(oparg))) {
+            _Py_uop_alloc_note_materialization(
+                ctx, GETLOCAL(oparg));
             GETLOCAL(oparg) = sym_new_type(ctx, &PyFloat_Type);
         }
     }
 
     op(_STORE_SUBSCR_LIST_INT, (value, list_st, sub_st -- ls, ss)) {
         (void)value;
+        if (_Py_uop_alloc_context_virtual_count(ctx, stack_pointer) > 0) {
+            /* The guarded variant closes only an exact old float, so shadow
+             * locals cannot be observed by an arbitrary destructor. */
+            ADD_OP(_STORE_SUBSCR_LIST_INT_FLOAT, oparg, 0);
+        }
+        ls = list_st;
+        ss = sub_st;
+    }
+
+    op(_STORE_SUBSCR_LIST_INT_FLOAT,
+       (value, list_st, sub_st -- ls, ss)) {
+        assert(!_Py_uop_alloc_is_virtual(ctx, value));
         ls = list_st;
         ss = sub_st;
     }
@@ -411,10 +425,12 @@ dummy_func(void) {
         if (sym_matches_type(value, &PyFloat_Type)) {
             ADD_OP(_NOP, 0, 0);
         }
-        else if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer))
+        else if (_Py_uop_alloc_context_stack_virtual_count(
+                     ctx, stack_pointer) != 0)
         {
-            /* Deoptimizing here would expose another live raw slot to Tier 1.
-             * Repeat the optimizer pass without virtualization instead. */
+            /* A raw operand-stack slot cannot be reconstructed by this guard.
+             * Shadow fast locals are different: the Tier-2 exit path restores
+             * them before Tier 1 observes the frame. */
             ctx->retry_without_virtuals = true;
             ctx->done = true;
             break;
@@ -428,12 +444,28 @@ dummy_func(void) {
         if (sym_matches_type(left, &PyFloat_Type)) {
             ADD_OP(_NOP, 0, 0);
         }
-        else if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer))
+        else if (_Py_uop_alloc_context_stack_virtual_count(
+                     ctx, stack_pointer) != 0)
         {
-            /* If the other input is the sole live virtual and is on TOS, box
-             * it before retaining the possibly deoptimizing NOS guard. */
+            int virtual_local =
+                find_unique_virtual_fast_local_alias(ctx, guarded_right);
             if (_Py_uop_alloc_is_virtual(ctx, guarded_right) &&
-                _Py_uop_alloc_context_virtual_count(
+                virtual_local >= 0 &&
+                _Py_uop_alloc_context_stack_virtual_count(
+                    ctx, stack_pointer) == 1)
+            {
+                /* Keep a shadow-local operand raw on the guard's hot path.
+                 * The specialized cold path reconstructs one shared box for
+                 * both the local and the operand stack before side-exiting. */
+                ADD_OP(_GUARD_NOS_FLOAT_VIRTUAL_FAST,
+                       oparg, virtual_local);
+            }
+            /* If the other operand is the sole stack virtual and is on TOS,
+             * box it before retaining the possibly deoptimizing NOS guard.
+             * Virtual fast locals do not prevent this: every Tier-2 exit
+             * reconstructs the shadow table before Tier 1 sees the frame. */
+            else if (_Py_uop_alloc_is_virtual(ctx, guarded_right) &&
+                _Py_uop_alloc_context_stack_virtual_count(
                     ctx, stack_pointer) == 1)
             {
                 JitOptRef concrete =
@@ -455,10 +487,90 @@ dummy_func(void) {
         right = guarded_right;
     }
 
+    op(_GUARD_NOS_FLOAT_VIRTUAL_FAST,
+       (left, right -- left, right)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, right));
+        assert(find_unique_virtual_fast_local_alias(ctx, right) ==
+               (int)this_instr->operand0);
+        sym_set_type(left, &PyFloat_Type);
+    }
+
     op(_BINARY_OP, (lhs, rhs -- res, l, r)) {
         l = lhs;
         r = rhs;
+        /* Give the optimizer DSL a valid output on every early-exit path.
+         * Ordinary concrete operations refine this below, while the virtual
+         * power path replaces it with a newly tracked virtual float. */
+        res = sym_new_unknown(ctx);
+        bool lhs_virtual = _Py_uop_alloc_is_virtual(ctx, lhs);
+        bool rhs_virtual = _Py_uop_alloc_is_virtual(ctx, rhs);
+        if (lhs_virtual || rhs_virtual) {
+            /* Float power can remain raw only when its Python result is proved
+             * to be a float.  A nonnegative virtual base and an exact constant
+             * float exponent cover nbody's squared-distance ** -1.5 without
+             * changing the negative-base-to-complex semantics. */
+            PyObject *rhs_const = sym_is_const(ctx, rhs)
+                ? sym_get_const(ctx, rhs) : NULL;
+            if ((oparg == NB_POWER || oparg == NB_INPLACE_POWER) &&
+                lhs_virtual && !rhs_virtual &&
+                _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, lhs) &&
+                rhs_const != NULL && PyFloat_CheckExact(rhs_const) &&
+                PyJitRef_IsBorrowed(rhs))
+            {
+                ADD_OP(_BINARY_OP_POWER_FLOAT_VIRTUAL_RAW_CONST, 0, 0);
+                l = PyJitRef_Borrow(sym_new_null(ctx));
+                r = PyJitRef_Borrow(sym_new_null(ctx));
+                res = PyJitRef_MakeUnique(
+                    sym_new_type(ctx, &PyFloat_Type));
+                JitVirtualRef virtual_ref =
+                    _Py_uop_alloc_new_virtual_float_from_inputs(
+                        ctx, res, lhs, rhs);
+                assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+                if (virtual_ref != JIT_VIRTUAL_REF_NULL) {
+                    _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(
+                        ctx, res);
+                }
+            }
+            else {
+                /* No generic object uop may receive opaque raw-double bits. */
+                ctx->retry_without_virtuals = true;
+                ctx->done = true;
+                res = sym_new_unknown(ctx);
+                l = lhs;
+                r = rhs;
+            }
+            break;
+        }
         REPLACE_OPCODE_IF_EVALUATES_PURE(lhs, rhs, res);
+        if ((oparg == NB_POWER || oparg == NB_INPLACE_POWER) &&
+            _Py_uop_alloc_context_virtual_count(ctx, stack_pointer) > 0)
+        {
+            /* The raw-power case above is self-contained.  A remaining generic
+             * power dispatch can invoke arbitrary Python, so restore any
+             * unrelated shadow locals before emitting it. */
+            if (ctx->curr_frame_depth != 1) {
+                /* Runtime shadow slots are indexed in the root frame.  An
+                 * inlined frame needs frame-aware reconstruction, which this
+                 * first implementation intentionally does not provide. */
+                ctx->retry_without_virtuals = true;
+                ctx->done = true;
+                break;
+            }
+            for (int local = 0; local < ctx->frame->locals_len &&
+                                local < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS;
+                 local++)
+            {
+                if (_Py_uop_alloc_is_virtual(
+                        ctx, ctx->frame->locals[local]))
+                {
+                    _Py_uop_alloc_note_materialization(
+                        ctx, ctx->frame->locals[local]);
+                    ADD_OP(_MATERIALIZE_VIRTUAL_FAST_LOCAL, local, 0);
+                    ctx->frame->locals[local] =
+                        sym_new_type(ctx, &PyFloat_Type);
+                }
+            }
+        }
         bool lhs_int = sym_matches_type(lhs, &PyLong_Type);
         bool rhs_int = sym_matches_type(rhs, &PyLong_Type);
         bool lhs_float = sym_matches_type(lhs, &PyFloat_Type);
@@ -607,8 +719,27 @@ dummy_func(void) {
     op(_BINARY_OP_ADD_FLOAT, (left, right -- res, l, r)) {
         bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
         bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
+        bool nonnegative_result =
+            left_virtual && right_virtual &&
+            _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, left) &&
+            _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, right);
         bool virtual_result = false;
-        if (left_virtual || right_virtual) {
+        if (!left_virtual && right_virtual && PyJitRef_IsUnique(left)) {
+            /* Keep the unique left box as the result object and consume the
+             * right virtual's raw payload without materializing it. */
+            ADD_OP(_BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW, 0, 0);
+            l = PyJitRef_Borrow(sym_new_null(ctx));
+            r = PyJitRef_Borrow(sym_new_null(ctx));
+        }
+        else if (left_virtual && !right_virtual &&
+                 PyJitRef_IsUnique(right)) {
+            /* Addition is commutative, but this distinct uop records that the
+             * reusable result box is the right operand. */
+            ADD_OP(_BINARY_OP_ADD_FLOAT_INPLACE_RAW_BOXED, 0, 0);
+            l = PyJitRef_Borrow(sym_new_null(ctx));
+            r = PyJitRef_Borrow(sym_new_null(ctx));
+        }
+        else if (left_virtual || right_virtual) {
             int emit_op;
             if (left_virtual && right_virtual) {
                 emit_op = _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW;
@@ -649,8 +780,12 @@ dummy_func(void) {
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
         if (virtual_result) {
             JitVirtualRef virtual_ref =
-                _Py_uop_alloc_new_virtual_float(ctx, res);
+                _Py_uop_alloc_new_virtual_float_from_inputs(
+                    ctx, res, left, right);
             assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+            if (virtual_ref != JIT_VIRTUAL_REF_NULL && nonnegative_result) {
+                _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(ctx, res);
+            }
         }
     }
 
@@ -658,7 +793,20 @@ dummy_func(void) {
         bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
         bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
         bool virtual_result = false;
-        if (left_virtual || right_virtual) {
+        if (!left_virtual && right_virtual && PyJitRef_IsUnique(left)) {
+            ADD_OP(_BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW, 0, 0);
+            l = PyJitRef_Borrow(sym_new_null(ctx));
+            r = PyJitRef_Borrow(sym_new_null(ctx));
+        }
+        else if (left_virtual && !right_virtual &&
+                 PyJitRef_IsUnique(right)) {
+            /* The right box is reused only as storage; the runtime uop still
+             * computes raw-left minus boxed-right. */
+            ADD_OP(_BINARY_OP_SUBTRACT_FLOAT_INPLACE_RAW_BOXED, 0, 0);
+            l = PyJitRef_Borrow(sym_new_null(ctx));
+            r = PyJitRef_Borrow(sym_new_null(ctx));
+        }
+        else if (left_virtual || right_virtual) {
             int virtual_mask =
                 (left_virtual ? _Py_JIT_VIRTUAL_FLOAT_RAW_LEFT : 0) |
                 (right_virtual ? _Py_JIT_VIRTUAL_FLOAT_RAW_RIGHT : 0);
@@ -692,7 +840,8 @@ dummy_func(void) {
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
         if (virtual_result) {
             JitVirtualRef virtual_ref =
-                _Py_uop_alloc_new_virtual_float(ctx, res);
+                _Py_uop_alloc_new_virtual_float_from_inputs(
+                    ctx, res, left, right);
             assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
         }
     }
@@ -700,8 +849,28 @@ dummy_func(void) {
     op(_BINARY_OP_MULTIPLY_FLOAT, (left, right -- res, l, r)) {
         bool left_virtual = _Py_uop_alloc_is_virtual(ctx, left);
         bool right_virtual = _Py_uop_alloc_is_virtual(ctx, right);
+        bool same_operand =
+            PyJitRef_Unwrap(left) == PyJitRef_Unwrap(right);
+        bool nonnegative_result = same_operand ||
+            (left_virtual && right_virtual &&
+             _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, left) &&
+             _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, right));
+        bool has_fresh_materialized_operand =
+            _Py_uop_alloc_is_fresh_materialized_float(ctx, left) ||
+            _Py_uop_alloc_is_fresh_materialized_float(ctx, right);
         bool virtual_result = false;
-        if (left_virtual || right_virtual) {
+        if (!left_virtual && right_virtual && PyJitRef_IsUnique(left)) {
+            ADD_OP(_BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW, 0, 0);
+            l = PyJitRef_Borrow(sym_new_null(ctx));
+            r = PyJitRef_Borrow(sym_new_null(ctx));
+        }
+        else if (left_virtual && !right_virtual &&
+                 PyJitRef_IsUnique(right)) {
+            ADD_OP(_BINARY_OP_MULTIPLY_FLOAT_INPLACE_RAW_BOXED, 0, 0);
+            l = PyJitRef_Borrow(sym_new_null(ctx));
+            r = PyJitRef_Borrow(sym_new_null(ctx));
+        }
+        else if (left_virtual || right_virtual) {
             int emit_op;
             if (left_virtual && right_virtual) {
                 emit_op = _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW;
@@ -717,6 +886,18 @@ dummy_func(void) {
                 ? PyJitRef_Borrow(sym_new_null(ctx)) : left;
             r = right_virtual
                 ? PyJitRef_Borrow(sym_new_null(ctx)) : right;
+            virtual_result = true;
+        }
+        else if (has_fresh_materialized_operand &&
+                 _Py_uop_can_virtualize_float_result(ctx))
+        {
+            /* A guard may have just boxed one raw operand so its exit can
+             * reconstruct the Python stack.  That box is proven fresh and
+             * unaliased, so prefer consuming it into another raw result over
+             * retaining it through the unique-reference in-place path. */
+            ADD_OP(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED, 0, 0);
+            l = left;
+            r = right;
             virtual_result = true;
         }
         else if (PyJitRef_IsUnique(left)) {
@@ -742,8 +923,12 @@ dummy_func(void) {
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
         if (virtual_result) {
             JitVirtualRef virtual_ref =
-                _Py_uop_alloc_new_virtual_float(ctx, res);
+                _Py_uop_alloc_new_virtual_float_from_inputs(
+                    ctx, res, left, right);
             assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+            if (virtual_ref != JIT_VIRTUAL_REF_NULL && nonnegative_result) {
+                _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(ctx, res);
+            }
         }
     }
 
@@ -757,7 +942,9 @@ dummy_func(void) {
         l = left;
         r = right;
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -768,7 +955,9 @@ dummy_func(void) {
         l = PyJitRef_Borrow(sym_new_null(ctx));
         r = right;
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -779,7 +968,9 @@ dummy_func(void) {
         l = left;
         r = PyJitRef_Borrow(sym_new_null(ctx));
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -790,8 +981,59 @@ dummy_func(void) {
         l = PyJitRef_Borrow(sym_new_null(ctx));
         r = PyJitRef_Borrow(sym_new_null(ctx));
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+        if (virtual_ref != JIT_VIRTUAL_REF_NULL &&
+            _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, left) &&
+            _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, right))
+        {
+            _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(ctx, res);
+        }
+    }
+
+    /* A mixed inplace uop consumes one virtual raw payload but returns the
+     * other operand's unique PyFloatObject.  Its abstract result is therefore
+     * concrete even though one input was virtual. */
+    op(_BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW,
+       (left, right -- res, l, r)) {
+        assert(!_Py_uop_alloc_is_virtual(ctx, left));
+        assert(_Py_uop_alloc_is_virtual(ctx, right));
+        assert(PyJitRef_IsUnique(left));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
+    }
+
+    op(_BINARY_OP_ADD_FLOAT_INPLACE_RAW_BOXED,
+       (left, right -- res, l, r)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, left));
+        assert(!_Py_uop_alloc_is_virtual(ctx, right));
+        assert(PyJitRef_IsUnique(right));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
+    }
+
+    op(_BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW,
+       (left, right -- res, l, r)) {
+        assert(!_Py_uop_alloc_is_virtual(ctx, left));
+        assert(_Py_uop_alloc_is_virtual(ctx, right));
+        assert(PyJitRef_IsUnique(left));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
+    }
+
+    op(_BINARY_OP_SUBTRACT_FLOAT_INPLACE_RAW_BOXED,
+       (left, right -- res, l, r)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, left));
+        assert(!_Py_uop_alloc_is_virtual(ctx, right));
+        assert(PyJitRef_IsUnique(right));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
     }
 
     op(_BINARY_OP_SUBTRACT_FLOAT_VIRTUAL, (left, right -- res, l, r)) {
@@ -804,7 +1046,9 @@ dummy_func(void) {
         l = left_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : left;
         r = right_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : right;
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -815,8 +1059,30 @@ dummy_func(void) {
         l = left;
         r = right;
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+    }
+
+    op(_BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW,
+       (left, right -- res, l, r)) {
+        assert(!_Py_uop_alloc_is_virtual(ctx, left));
+        assert(_Py_uop_alloc_is_virtual(ctx, right));
+        assert(PyJitRef_IsUnique(left));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
+    }
+
+    op(_BINARY_OP_MULTIPLY_FLOAT_INPLACE_RAW_BOXED,
+       (left, right -- res, l, r)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, left));
+        assert(!_Py_uop_alloc_is_virtual(ctx, right));
+        assert(PyJitRef_IsUnique(right));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
     }
 
     op(_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED,
@@ -826,7 +1092,9 @@ dummy_func(void) {
         l = PyJitRef_Borrow(sym_new_null(ctx));
         r = right;
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -837,7 +1105,9 @@ dummy_func(void) {
         l = left;
         r = PyJitRef_Borrow(sym_new_null(ctx));
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -848,8 +1118,36 @@ dummy_func(void) {
         l = PyJitRef_Borrow(sym_new_null(ctx));
         r = PyJitRef_Borrow(sym_new_null(ctx));
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+        if (virtual_ref != JIT_VIRTUAL_REF_NULL &&
+            (PyJitRef_Unwrap(left) == PyJitRef_Unwrap(right) ||
+             (_Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, left) &&
+              _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, right))))
+        {
+            _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(ctx, res);
+        }
+    }
+
+    op(_BINARY_OP_POWER_FLOAT_VIRTUAL_RAW_CONST,
+       (left, right -- res, l, r)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, left));
+        assert(_Py_uop_alloc_virtual_float_is_nonnegative_or_nan(ctx, left));
+        assert(!_Py_uop_alloc_is_virtual(ctx, right));
+        assert(sym_is_const(ctx, right));
+        assert(PyFloat_CheckExact(sym_get_const(ctx, right)));
+        l = PyJitRef_Borrow(sym_new_null(ctx));
+        r = PyJitRef_Borrow(sym_new_null(ctx));
+        res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, left, right);
+        assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
+        if (virtual_ref != JIT_VIRTUAL_REF_NULL) {
+            _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(ctx, res);
+        }
     }
 
     op(_MATERIALIZE_VIRTUAL_FLOAT, (value -- res)) {
@@ -1170,7 +1468,8 @@ dummy_func(void) {
         }
         if (virtual_result) {
             JitVirtualRef virtual_ref =
-                _Py_uop_alloc_new_virtual_float(ctx, res);
+                _Py_uop_alloc_new_virtual_float_from_inputs(
+                    ctx, res, value, PyJitRef_NULL);
             assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
         }
     }
@@ -1182,7 +1481,9 @@ dummy_func(void) {
         assert(oparg == virtual_mask);
         v = value_virtual ? PyJitRef_Borrow(sym_new_null(ctx)) : value;
         res = PyJitRef_MakeUnique(sym_new_type(ctx, &PyFloat_Type));
-        JitVirtualRef virtual_ref = _Py_uop_alloc_new_virtual_float(ctx, res);
+        JitVirtualRef virtual_ref =
+            _Py_uop_alloc_new_virtual_float_from_inputs(
+                ctx, res, value, PyJitRef_NULL);
         assert(virtual_ref != JIT_VIRTUAL_REF_NULL || ctx->out_of_space);
     }
 
@@ -2569,6 +2870,8 @@ dummy_func(void) {
                     _Py_uop_alloc_is_virtual(
                         ctx, ctx->frame->locals[local]))
                 {
+                    _Py_uop_alloc_note_materialization(
+                        ctx, ctx->frame->locals[local]);
                     ADD_OP(_MATERIALIZE_VIRTUAL_FAST_LOCAL, local, 0);
                     emitted_prefix = true;
                     ctx->frame->locals[local] =

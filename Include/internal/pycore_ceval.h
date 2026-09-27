@@ -135,6 +135,9 @@ _Py_CODEUNIT *_PyTier2Interpreter(
  * all shadowed locals to ordinary boxed frame slots. */
 extern void _PyJIT_ResetVirtualFastLocals(
     PyThreadState *tstate, _PyInterpreterFrame *frame);
+extern void _PyJIT_StoreVirtualFastLocal(
+    PyThreadState *tstate, _PyInterpreterFrame *frame,
+    int local_index, double value);
 extern int _PyJIT_MaterializeVirtualFastLocal(
     PyThreadState *tstate, int local_index);
 extern int _PyJIT_MaterializeVirtualFastLocals(PyThreadState *tstate);

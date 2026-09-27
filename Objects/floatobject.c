@@ -684,6 +684,75 @@ float_floor_div(PyObject *v, PyObject *w)
    x is not an infinity or nan. */
 #define DOUBLE_IS_ODD_INTEGER(x) (fmod(fabs(x), 2.0) == 1.0)
 
+int
+_PyFloat_PowNonNegative(double iv, double iw, double *result)
+{
+    /* This is float_pow's allocation-free path for a base which abstract
+     * interpretation has proved cannot be a finite negative number.  Keeping
+     * the special cases here, instead of calling libm pow() directly, preserves
+     * Python's zero, infinity, NaN, and exception semantics. */
+    assert(result != NULL);
+    assert(!(iv < 0.0));
+
+    if (iw == 0.0) {
+        *result = 1.0;
+        return 0;
+    }
+    if (isnan(iv)) {
+        *result = iv;
+        return 0;
+    }
+    if (isnan(iw)) {
+        *result = iv == 1.0 ? 1.0 : iw;
+        return 0;
+    }
+    if (isinf(iw)) {
+        iv = fabs(iv);
+        if (iv == 1.0) {
+            *result = 1.0;
+        }
+        else if ((iw > 0.0) == (iv > 1.0)) {
+            *result = fabs(iw);
+        }
+        else {
+            *result = 0.0;
+        }
+        return 0;
+    }
+    if (isinf(iv)) {
+        int iw_is_odd = DOUBLE_IS_ODD_INTEGER(iw);
+        *result = iw > 0.0
+            ? (iw_is_odd ? iv : fabs(iv))
+            : (iw_is_odd ? copysign(0.0, iv) : 0.0);
+        return 0;
+    }
+    if (iv == 0.0) {
+        int iw_is_odd = DOUBLE_IS_ODD_INTEGER(iw);
+        if (iw < 0.0) {
+            PyErr_SetString(PyExc_ZeroDivisionError,
+                            "zero to a negative power");
+            return -1;
+        }
+        *result = iw_is_odd ? iv : 0.0;
+        return 0;
+    }
+    if (iv == 1.0) {
+        *result = 1.0;
+        return 0;
+    }
+
+    errno = 0;
+    double ix = pow(iv, iw);
+    _Py_ADJUST_ERANGE1(ix);
+    if (errno != 0) {
+        PyErr_SetFromErrno(errno == ERANGE ? PyExc_OverflowError
+                                          : PyExc_ValueError);
+        return -1;
+    }
+    *result = ix;
+    return 0;
+}
+
 static PyObject *
 float_pow(PyObject *v, PyObject *w, PyObject *z)
 {
@@ -698,6 +767,13 @@ float_pow(PyObject *v, PyObject *w, PyObject *z)
 
     CONVERT_TO_DOUBLE(v, iv);
     CONVERT_TO_DOUBLE(w, iw);
+
+    if (!(iv < 0.0)) {
+        if (_PyFloat_PowNonNegative(iv, iw, &ix) < 0) {
+            return NULL;
+        }
+        return PyFloat_FromDouble(ix);
+    }
 
     /* Sort out special cases here instead of relying on pow() */
     if (iw == 0) {              /* v**0 is 1, even 0**0 */

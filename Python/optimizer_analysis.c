@@ -300,6 +300,24 @@ virtuals_cross_unsafe_barrier(
             materialized = true;
             continue;
         }
+        if (uop->opcode == _SWAP_FAST_VIRTUAL_FLOAT) {
+            /* Its uncommon old-object path reconstructs every existing
+             * shadow before allocating or running a destructor; the common
+             * path only moves one raw value from the stack into the shadow
+             * table.  The uop therefore owns its escape discipline. */
+            continue;
+        }
+        if (uop->opcode == _BINARY_OP_POWER_FLOAT_VIRTUAL_RAW_CONST) {
+            /* It consumes its raw/borrowed inputs before the only error edge
+             * and produces another raw float only on success. */
+            continue;
+        }
+        if (uop->opcode == _GUARD_NOS_FLOAT_VIRTUAL_FAST) {
+            /* Its hot path only checks the boxed NOS operand.  Its cold path
+             * reconstructs one identity-preserving box in both the shadowed
+             * local and TOS before either its error or side exit. */
+            continue;
+        }
         if (raw_is_live && is_virtualization_barrier(uop)) {
             return true;
         }
@@ -344,9 +362,13 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
     /* These uops either consume raw double bits directly or contain their own
      * precise materialization rule.  All other barriers must see only normal
      * PyStackRefs. */
+    if (uop->opcode == _BINARY_OP) {
+        return uop->oparg == NB_POWER || uop->oparg == NB_INPLACE_POWER;
+    }
     switch (uop->opcode) {
         case _GUARD_TOS_FLOAT:
         case _GUARD_NOS_FLOAT:
+        case _GUARD_NOS_FLOAT_VIRTUAL_FAST:
         case _BINARY_OP_ADD_FLOAT:
         case _BINARY_OP_SUBTRACT_FLOAT:
         case _BINARY_OP_MULTIPLY_FLOAT:
@@ -354,11 +376,18 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED:
         case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW:
         case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW:
+        case _BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW:
+        case _BINARY_OP_ADD_FLOAT_INPLACE_RAW_BOXED:
         case _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL:
+        case _BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW:
+        case _BINARY_OP_SUBTRACT_FLOAT_INPLACE_RAW_BOXED:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW:
+        case _BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW:
+        case _BINARY_OP_MULTIPLY_FLOAT_INPLACE_RAW_BOXED:
+        case _BINARY_OP_POWER_FLOAT_VIRTUAL_RAW_CONST:
         case _UNARY_NEGATIVE:
         case _UNARY_NEGATIVE_FLOAT_VIRTUAL:
         case _TO_BOOL:
@@ -378,6 +407,51 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         default:
             return false;
     }
+}
+
+static bool
+uop_preserves_virtual_fast_locals(const _PyUOpInstruction *uop)
+{
+    /* These source uops either cannot invoke Python on their hot path or are
+     * rewritten to a guarded form with that property.  Their side exits use
+     * normal Tier-2 shadow-local reconstruction. */
+    switch (uop->opcode) {
+        case _BINARY_OP_SUBSCR_LIST_INT:
+        case _STORE_SUBSCR_LIST_INT:
+        case _STORE_SUBSCR_LIST_INT_FLOAT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static int
+find_unique_virtual_fast_local_alias(JitOptContext *ctx, JitOptRef value)
+{
+    /* A failing type guard may reconstruct a raw operand without changing
+     * Python identity only when that operand aliases exactly one root-frame
+     * shadow local.  The specialized guard installs one box in that local and
+     * duplicates the same reference onto the operand stack. */
+    if (ctx->curr_frame_depth != 1) {
+        return -1;
+    }
+    int match = -1;
+    int limit = ctx->frame->locals_len;
+    if (limit > _PY_JIT_MAX_VIRTUAL_FAST_LOCALS) {
+        limit = _PY_JIT_MAX_VIRTUAL_FAST_LOCALS;
+    }
+    for (int local = 0; local < limit; local++) {
+        JitOptRef candidate = ctx->frame->locals[local];
+        if (_Py_uop_alloc_is_virtual(ctx, candidate) &&
+            PyJitRef_Unwrap(candidate) == PyJitRef_Unwrap(value))
+        {
+            if (match >= 0) {
+                return -1;
+            }
+            match = local;
+        }
+    }
+    return match;
 }
 
 static bool
@@ -645,10 +719,23 @@ optimize_pop_top(JitOptContext *ctx, _PyUOpInstruction *this_instr, JitOptRef va
 bool
 _Py_uop_can_virtualize_float_result(JitOptContext *ctx)
 {
-    /* Validate the actual rewritten output instead of predicting a result's
-     * consumers with bounded lookahead.  An unsafe attempt is thrown away and
-     * the complete optimizer pass is repeated without virtualization. */
-    return ctx->virtual_floats_enabled;
+    if (!ctx->virtual_floats_enabled) {
+        return false;
+    }
+    /* A NULL plan is the legacy optimistic policy.  The profiling pass also
+     * admits every candidate so it can observe the complete raw-value graph. */
+    if (ctx->virtualization_plan == NULL ||
+        ctx->collect_virtualization_profitability)
+    {
+        return true;
+    }
+    /* Pass two makes the decision at the same input-trace position.  Missing
+     * entries are rejected conservatively: they were not proven profitable
+     * by the optimistic pass. */
+    int producer = ctx->current_trace_index;
+    return producer >= 0 && producer < UOP_MAX_TRACE_LENGTH &&
+        ctx->virtualization_plan->producer_seen[producer] &&
+        ctx->virtualization_plan->producer_profitable[producer];
 }
 
 /* Look up name via super (normal case from supercheck where
@@ -777,7 +864,9 @@ optimize_uops(
     int curr_stacklen,
     _PyUOpInstruction *output,
     _PyBloomFilter *dependencies,
-    bool enable_virtual_floats
+    bool enable_virtual_floats,
+    JitVirtualizationPlan *virtualization_plan,
+    bool collect_virtualization_profitability
 )
 {
     assert(!PyErr_Occurred());
@@ -795,6 +884,9 @@ optimize_uops(
                          _setup_optimizer_watchers, NULL);
 
     _Py_uop_abstractcontext_init(ctx, dependencies);
+    ctx->virtualization_plan = virtualization_plan;
+    ctx->collect_virtualization_profitability =
+        collect_virtualization_profitability;
     /* Platform support and debug-stack compatibility are checked once per
      * pass; individual producer rules can then use a cheap boolean gate. */
     ctx->virtual_floats_enabled =
@@ -819,9 +911,11 @@ optimize_uops(
 
     _PyUOpInstruction *this_instr = NULL;
     JitOptRef *stack_pointer = ctx->frame->stack_pointer;
+    bool reached_loop_backedge = false;
 
     for (int i = 0; i < trace_len; i++) {
         this_instr = &trace[i];
+        ctx->current_trace_index = i;
         if (ctx->done) {
             // Don't do any more optimization, but
             // we still need to reach a terminator for corrctness.
@@ -859,7 +953,8 @@ optimize_uops(
          * rebuild their shared identity, so retry the trace without virtuals. */
         if (ctx->virtual_floats_enabled && local_virtuals_before != 0 &&
             (_PyUop_Flags[this_instr->opcode] & HAS_ESCAPES_FLAG) != 0 &&
-            !uop_handles_virtual_float(this_instr))
+            !uop_handles_virtual_float(this_instr) &&
+            !uop_preserves_virtual_fast_locals(this_instr))
         {
             if (local_virtuals_before < 0 || live_virtuals_before != 0 ||
                 ctx->curr_frame_depth != 1)
@@ -873,6 +968,8 @@ optimize_uops(
                  local++)
             {
                 if (_Py_uop_alloc_is_virtual(ctx, ctx->frame->locals[local])) {
+                    _Py_uop_alloc_note_materialization(
+                        ctx, ctx->frame->locals[local]);
                     add_op(ctx, this_instr,
                            _MATERIALIZE_VIRTUAL_FAST_LOCAL, local, 0);
                     ctx->frame->locals[local] =
@@ -908,6 +1005,9 @@ optimize_uops(
             default:
                 DPRINTF(1, "\nUnknown opcode in abstract interpreter\n");
                 Py_UNREACHABLE();
+        }
+        if (opcode == _JUMP_TO_TOP) {
+            reached_loop_backedge = true;
         }
         // If no ADD_OP was called during this iteration, copy the original instruction
         if (ctx->out_buffer.next == source_out_ptr) {
@@ -957,12 +1057,39 @@ optimize_uops(
         return 0;
     }
 
-    /* Exit reconstruction cannot yet box raw slots, so every active inlined
-     * frame must be concrete before the executor is installed. */
-    if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer)) {
+    /* A loop executor may retain write-before-read root-frame locals in the
+     * runtime shadow table across its direct backedge.  Operand-stack values,
+     * inlined-frame values, unsafe locals, and every non-loop terminator still
+     * require ordinary boxed exit reconstruction. */
+    bool safe_loop_shadows = false;
+    if (reached_loop_backedge &&
+        ctx->curr_frame_depth == 1 &&
+        _Py_uop_alloc_context_stack_virtual_count(ctx, stack_pointer) == 0)
+    {
+        safe_loop_shadows = true;
+        for (int local = 0; local < ctx->frame->locals_len; local++) {
+            if (_Py_uop_alloc_is_virtual(ctx, ctx->frame->locals[local]) &&
+                (local >= _PY_JIT_MAX_VIRTUAL_FAST_LOCALS ||
+                 !ctx->virtual_fast_local_loop_safe[local]))
+            {
+                safe_loop_shadows = false;
+                break;
+            }
+        }
+    }
+    if (_Py_uop_alloc_context_has_virtual(ctx, stack_pointer) &&
+        !safe_loop_shadows)
+    {
         DPRINTF(1, "virtual float remained live at the end; retrying\n");
         _Py_uop_abstractcontext_fini(ctx);
         return OPTIMIZE_RETRY_WITHOUT_VIRTUALS;
+    }
+
+    if (ctx->collect_virtualization_profitability &&
+        ctx->virtualization_plan != NULL)
+    {
+        /* Export decisions before fini discards the trace-local descriptors. */
+        _Py_uop_alloc_build_profitability_plan(ctx);
     }
 
     /* Either reached the end or cannot optimize further, but there
@@ -1108,26 +1235,77 @@ _Py_uop_analyze_and_optimize(
 {
     OPT_STAT_INC(optimizer_attempts);
 
-    bool enable_virtual_floats = true;
+    enum {
+        VIRTUAL_FLOATS_DISABLED,
+        VIRTUAL_FLOATS_HEURISTIC,
+        VIRTUAL_FLOATS_OPTIMISTIC,
+    } virtual_float_mode = VIRTUAL_FLOATS_HEURISTIC;
     /* Private A/B switch for the virtual-float experiment.  Reading it while
-     * compiling a trace does not affect the generated executor's hot path. */
+     * compiling a trace does not affect the generated executor's hot path.
+     * 0 disables virtualization, 2/optimistic selects the old policy, and
+     * unset/1/heuristic selects the profitability pass. */
     char *virtual_floats = Py_GETENV("PYTHON_JIT_VIRTUAL_FLOATS");
     if (virtual_floats != NULL && *virtual_floats == '0') {
-        enable_virtual_floats = false;
+        virtual_float_mode = VIRTUAL_FLOATS_DISABLED;
+    }
+    else if (virtual_floats != NULL &&
+             (*virtual_floats == '2' ||
+              strcmp(virtual_floats, "optimistic") == 0))
+    {
+        virtual_float_mode = VIRTUAL_FLOATS_OPTIMISTIC;
     }
 
     int trace_length = length;
-    length = optimize_uops(
-        tstate, buffer, trace_length, curr_stacklen, output, dependencies,
-        enable_virtual_floats);
+    if (virtual_float_mode == VIRTUAL_FLOATS_HEURISTIC) {
+        /* The first pass measures a complete optimistic virtual graph.  The
+         * second pass starts from fresh abstract state and emits only the
+         * connected components whose virtual work exceeds reconstruction. */
+        JitVirtualizationPlan plan = {0};
+        length = optimize_uops(
+            tstate, buffer, trace_length, curr_stacklen, output, dependencies,
+            true, &plan, true);
+        bool has_virtual_candidates = false;
+        bool has_profitable_candidates = false;
+        for (int i = 0; i < trace_length; i++) {
+            if (plan.producer_seen[i]) {
+                has_virtual_candidates = true;
+                if (plan.producer_profitable[i]) {
+                    has_profitable_candidates = true;
+                }
+            }
+        }
+        /* Avoid a redundant optimizer pass for the overwhelmingly common
+         * traces with no virtual-float producer.  Besides reducing compile
+         * cost, this preserves the optimizer's established single-pass
+         * handling of mutable profiling facts and dependency watchers. */
+        if (length > 0 && has_profitable_candidates) {
+            length = optimize_uops(
+                tstate, buffer, trace_length, curr_stacklen, output,
+                dependencies, true, &plan, false);
+        }
+        else if (length > 0 && has_virtual_candidates) {
+            /* If every component lost the profitability test, generate the
+             * ordinary boxed trace directly.  This makes reject-all exactly
+             * equivalent to mode 0 instead of replaying a nominally virtual
+             * pass which happens not to select any producers. */
+            length = optimize_uops(
+                tstate, buffer, trace_length, curr_stacklen, output,
+                dependencies, false, NULL, false);
+        }
+    }
+    else {
+        length = optimize_uops(
+            tstate, buffer, trace_length, curr_stacklen, output, dependencies,
+            virtual_float_mode == VIRTUAL_FLOATS_OPTIMISTIC, NULL, false);
+    }
 
     if (length == OPTIMIZE_RETRY_WITHOUT_VIRTUALS) {
         /* The first pass is speculative.  Reinitialize every abstract arena
          * and regenerate the trace using CPython's ordinary boxed uops. */
-        assert(enable_virtual_floats);
+        assert(virtual_float_mode != VIRTUAL_FLOATS_DISABLED);
         length = optimize_uops(
             tstate, buffer, trace_length, curr_stacklen, output, dependencies,
-            false);
+            false, NULL, false);
     }
 
     if (length == 0) {

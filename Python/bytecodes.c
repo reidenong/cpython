@@ -40,6 +40,7 @@
 #include "pycore_dict.h"
 #include "dictobject.h"
 #include "pycore_frame.h"
+#include "pycore_floatobject.h"
 #include "opcode.h"
 #include "optimizer.h"
 #include "pydtrace.h"
@@ -338,57 +339,72 @@ dummy_func(
             _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
             uint32_t bit = UINT32_C(1) << oparg;
             assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
-            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
-            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
-            /* Recreate the opaque stack carrier from the shadow double.  This
-             * is a bit copy, not a Python allocation or reference operation. */
-            value = _PyJIT_PackRawDouble(
-                tstate_impl->jit_virtual_fast_locals.values[oparg]);
+            double raw;
+            if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0) {
+                assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+                raw = tstate_impl->jit_virtual_fast_locals.values[oparg];
+            }
+            else {
+                /* Continuing after a virtual store guarantees a shadow
+                 * entry: an arbitrary old local deopts at the store itself. */
+                Py_UNREACHABLE();
+            }
+            /* Recreate the opaque stack carrier without allocating. */
+            value = _PyJIT_PackRawDouble(raw);
         }
 
         tier2 op(_LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT, (-- value)) {
             _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
             uint32_t bit = UINT32_C(1) << oparg;
             assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
-            assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
-            assert((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0);
-            value = _PyJIT_PackRawDouble(
-                tstate_impl->jit_virtual_fast_locals.values[oparg]);
-            tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
-            if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
-                tstate_impl->jit_virtual_fast_locals.frame = NULL;
-            }
-        }
-
-        tier2 op(_SWAP_FAST_VIRTUAL_FLOAT, (value -- trash)) {
-            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
-            uint32_t bit = UINT32_C(1) << oparg;
-            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
-
-            if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) == 0) {
-                /* The optimizer only emits this uop when the old value is
-                 * NULL or an exact float.  Closing that old value cannot run
-                 * arbitrary Python while the new value is still unboxed. */
-                _PyStackRef old = GETLOCAL(oparg);
-                assert(PyStackRef_IsNull(old) ||
-                       PyFloat_CheckExact(PyStackRef_AsPyObjectBorrow(old)));
-                GETLOCAL(oparg) = PyStackRef_NULL;
-                if (!PyStackRef_IsNull(old)) {
-                    PyStackRef_CLOSE_SPECIALIZED(old, _PyFloat_ExactDealloc);
+            double raw;
+            if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) != 0) {
+                assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+                raw = tstate_impl->jit_virtual_fast_locals.values[oparg];
+                tstate_impl->jit_virtual_fast_locals.valid_mask &= ~bit;
+                if (tstate_impl->jit_virtual_fast_locals.valid_mask == 0) {
+                    tstate_impl->jit_virtual_fast_locals.frame = NULL;
                 }
             }
             else {
-                assert(tstate_impl->jit_virtual_fast_locals.frame == frame);
+                Py_UNREACHABLE();
+            }
+            value = _PyJIT_PackRawDouble(raw);
+        }
+
+        tier2 op(_SWAP_FAST_VIRTUAL_FLOAT, (value -- trash)) {
+            assert(oparg < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+            _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+            uint32_t bit = UINT32_C(1) << oparg;
+
+            if ((tstate_impl->jit_virtual_fast_locals.valid_mask & bit) == 0) {
+                _PyStackRef old = GETLOCAL(oparg);
+                if (!PyStackRef_IsNull(old) &&
+                    !PyFloat_CheckExact(PyStackRef_AsPyObjectBorrow(old)))
+                {
+                    /* STORE_FAST closes its old value after installing the
+                     * new one, so an arbitrary destructor may inspect or
+                     * mutate the frame.  Reconstruct a fully boxed pre-store
+                     * state and let Tier 1 perform that observable operation.
+                     * The output occupies the same stack slot as the consumed
+                     * raw input, so DEOPT_IF exposes the boxed replacement to
+                     * the original STORE_FAST instruction. */
+                    double raw = _PyJIT_UnpackRawDouble(value);
+                    PyObject *boxed = PyFloat_FromDouble(raw);
+                    DEAD(value);
+                    ERROR_IF(boxed == NULL);
+                    trash = PyStackRef_FromPyObjectSteal(boxed);
+                    int err = _PyJIT_MaterializeVirtualFastLocals(tstate);
+                    ERROR_IF(err < 0);
+                    DEOPT_IF(true);
+                }
             }
 
-            tstate_impl->jit_virtual_fast_locals.frame = frame;
-            tstate_impl->jit_virtual_fast_locals.values[oparg] =
-                _PyJIT_UnpackRawDouble(value);
-            tstate_impl->jit_virtual_fast_locals.valid_mask |= bit;
+            double raw = _PyJIT_UnpackRawDouble(value);
             DEAD(value);
-            /* STORE_FAST's following POP_TOP must see no old Python object;
-             * the old boxed float was closed above or the old shadow value
-             * was overwritten without owning a reference. */
+            _PyJIT_StoreVirtualFastLocal(tstate, frame, oparg, raw);
+            /* The helper closes only NULL or an exact float, so STORE_FAST's
+             * following POP_TOP has no work on the virtual hot path. */
             trash = PyStackRef_NULL;
         }
 
@@ -899,6 +915,27 @@ dummy_func(
             EXIT_IF(!PyFloat_CheckExact(left_o));
         }
 
+        tier2 op(_GUARD_NOS_FLOAT_VIRTUAL_FAST,
+                 (left, right -- left, right)) {
+            /* right is a raw projection of one shadow fast local.  On the hot
+             * path this is an ordinary exact-float guard and leaves the raw
+             * value untouched.  If the guard fails, reconstruct the local
+             * first and duplicate that exact same box onto the operand stack;
+             * Tier 1 can then dispatch without breaking object identity. */
+            PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+            if (!PyFloat_CheckExact(left_o)) {
+                int local_index = (int)CURRENT_OPERAND0_32();
+                assert(local_index >= 0);
+                assert(local_index < _PY_JIT_MAX_VIRTUAL_FAST_LOCALS);
+                DEAD(right);
+                int err = _PyJIT_MaterializeVirtualFastLocal(
+                    tstate, local_index);
+                ERROR_IF(err < 0);
+                right = PyStackRef_DUP(GETLOCAL(local_index));
+                EXIT_IF(true);
+            }
+        }
+
         op(_GUARD_TOS_FLOAT, (value -- value)) {
             PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
             EXIT_IF(!PyFloat_CheckExact(value_o));
@@ -975,6 +1012,26 @@ dummy_func(
             l = PyStackRef_NULL;
             r = PyStackRef_NULL;
             INPUTS_DEAD();
+        }
+
+        tier2 op(_BINARY_OP_POWER_FLOAT_VIRTUAL_RAW_CONST,
+                 (left, right -- res, l, r)) {
+            /* The optimizer proves that left is nonnegative (or NaN) and that
+             * right is a borrowed exact-float constant.  Therefore Python's
+             * value-dependent power result cannot become a complex object. */
+            double base = _PyJIT_UnpackRawDouble(left);
+            PyObject *right_o = PyStackRef_AsPyObjectBorrow(right);
+            assert(PyFloat_CheckExact(right_o));
+            double exponent = PyFloat_AS_DOUBLE(right_o);
+            DEAD(left);
+            DEAD(right);
+            double result;
+            int err = _PyFloat_PowNonNegative(base, exponent, &result);
+            ERROR_IF(err < 0);
+            STAT_INC(BINARY_OP, hit);
+            res = _PyJIT_PackRawDouble(result);
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
         }
 
         pure op(_BINARY_OP_ADD_FLOAT, (left, right -- res, l, r)) {
@@ -1157,6 +1214,104 @@ dummy_func(
             FLOAT_INPLACE_OP(left, right, right, -);
             res = right;
             l = left;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        /* Mixed-representation inplace operations reuse the one real object
+         * instead of first materializing the raw virtual operand.  The boxed
+         * operand must be uniquely referenced, exactly like the ordinary
+         * inplace uops above.  Raw inputs own no Python reference, so both
+         * cleanup outputs are NULL: the boxed input becomes res and the raw
+         * input simply dies with this operation. */
+        tier2 op(_BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW,
+                 (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            assert(PyFloat_CheckExact(left_o));
+            assert(_PyObject_IsUniquelyReferenced((PyObject *)left_o));
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            left_o->ob_fval += right_value;
+            res = left;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 op(_BINARY_OP_ADD_FLOAT_INPLACE_RAW_BOXED,
+                 (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            assert(PyFloat_CheckExact(right_o));
+            assert(_PyObject_IsUniquelyReferenced((PyObject *)right_o));
+            STAT_INC(BINARY_OP, hit);
+            right_o->ob_fval = left_value + right_o->ob_fval;
+            res = right;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 op(_BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW,
+                 (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            assert(PyFloat_CheckExact(left_o));
+            assert(_PyObject_IsUniquelyReferenced((PyObject *)left_o));
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            left_o->ob_fval -= right_value;
+            res = left;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 op(_BINARY_OP_SUBTRACT_FLOAT_INPLACE_RAW_BOXED,
+                 (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            assert(PyFloat_CheckExact(right_o));
+            assert(_PyObject_IsUniquelyReferenced((PyObject *)right_o));
+            STAT_INC(BINARY_OP, hit);
+            /* The right-hand object is only storage.  Preserve Python's
+             * left-minus-right operand order when writing the result to it. */
+            right_o->ob_fval = left_value - right_o->ob_fval;
+            res = right;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 op(_BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW,
+                 (left, right -- res, l, r)) {
+            PyFloatObject *left_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(left);
+            assert(PyFloat_CheckExact(left_o));
+            assert(_PyObject_IsUniquelyReferenced((PyObject *)left_o));
+            double right_value = _PyJIT_UnpackRawDouble(right);
+            STAT_INC(BINARY_OP, hit);
+            left_o->ob_fval *= right_value;
+            res = left;
+            l = PyStackRef_NULL;
+            r = PyStackRef_NULL;
+            INPUTS_DEAD();
+        }
+
+        tier2 op(_BINARY_OP_MULTIPLY_FLOAT_INPLACE_RAW_BOXED,
+                 (left, right -- res, l, r)) {
+            double left_value = _PyJIT_UnpackRawDouble(left);
+            PyFloatObject *right_o =
+                (PyFloatObject *)PyStackRef_AsPyObjectBorrow(right);
+            assert(PyFloat_CheckExact(right_o));
+            assert(_PyObject_IsUniquelyReferenced((PyObject *)right_o));
+            STAT_INC(BINARY_OP, hit);
+            right_o->ob_fval = left_value * right_o->ob_fval;
+            res = right;
+            l = PyStackRef_NULL;
             r = PyStackRef_NULL;
             INPUTS_DEAD();
         }
@@ -1708,6 +1863,43 @@ dummy_func(
             ls = list_st;
             ss = sub_st;
             Py_DECREF(old_value);
+        }
+
+        tier2 op(_STORE_SUBSCR_LIST_INT_FLOAT,
+                 (value, list_st, sub_st -- ls, ss)) {
+            /* Virtual fast locals may remain hidden while this specialized
+             * store runs: every possible side exit reconstructs them, and the
+             * replaced element is guarded as an exact float before mutation so
+             * its final decref cannot execute arbitrary Python. */
+            PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
+            PyObject *list = PyStackRef_AsPyObjectBorrow(list_st);
+            assert(PyLong_CheckExact(sub));
+            assert(PyList_CheckExact(list));
+
+            Py_ssize_t index = _PyLong_CompactValue((PyLongObject *)sub);
+            DEOPT_IF(!LOCK_OBJECT(list));
+            Py_ssize_t len = PyList_GET_SIZE(list);
+            if (index < 0) {
+                index += len;
+            }
+            if (index < 0 || index >= len) {
+                UNLOCK_OBJECT(list);
+                DEOPT_IF(true);
+            }
+            PyObject *old_value = PyList_GET_ITEM(list, index);
+            if (!PyFloat_CheckExact(old_value)) {
+                UNLOCK_OBJECT(list);
+                DEOPT_IF(true);
+            }
+
+            STAT_INC(STORE_SUBSCR, hit);
+            FT_ATOMIC_STORE_PTR_RELEASE(_PyList_ITEMS(list)[index],
+                                        PyStackRef_AsPyObjectSteal(value));
+            UNLOCK_OBJECT(list);
+            INPUTS_DEAD();
+            ls = list_st;
+            ss = sub_st;
+            _Py_DECREF_SPECIALIZED(old_value, _PyFloat_ExactDealloc);
         }
 
         macro(STORE_SUBSCR_DICT) =

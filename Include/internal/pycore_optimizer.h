@@ -88,6 +88,10 @@ typedef struct _JitOptContext {
     /* Allocation representation for each type-arena symbol.  Zero entries
      * are concrete; non-zero entries index virtuals.arena plus one. */
     JitVirtualRef allocations[TY_ARENA_SIZE];
+    /* A materialized virtual is a fresh, unaliased exact-float box.  Remember
+     * that provenance separately from the concrete/virtual state so a nearby
+     * supported arithmetic uop may safely return to the raw representation. */
+    bool fresh_materialized_float[TY_ARENA_SIZE];
     JitVirtualArena virtuals;
 
     /* Virtualization is attempted transactionally.  If a raw value reaches a
@@ -95,6 +99,13 @@ typedef struct _JitOptContext {
      * and repeats the same analysis with virtual floats disabled. */
     bool virtual_floats_enabled;
     bool retry_without_virtuals;
+
+    /* The heuristic first profiles an optimistic pass, then replays only
+     * producer sites selected in this trace-indexed plan.  A NULL plan means
+     * the legacy optimistic policy. */
+    JitVirtualizationPlan *virtualization_plan;
+    bool collect_virtualization_profitability;
+    int current_trace_index;
 
     /*
      * A shadow local may survive _JUMP_TO_TOP only if its virtual store is the
@@ -501,7 +512,18 @@ extern bool _Py_uop_alloc_is_virtual(JitOptContext *ctx, JitOptRef ref);
 extern bool _Py_uop_alloc_set_concrete(JitOptContext *ctx, JitOptRef ref);
 extern JitVirtualRef _Py_uop_alloc_new_virtual_float(
     JitOptContext *ctx, JitOptRef ref);
+extern JitVirtualRef _Py_uop_alloc_new_virtual_float_from_inputs(
+    JitOptContext *ctx, JitOptRef ref, JitOptRef left, JitOptRef right);
+extern void _Py_uop_alloc_note_materialization(
+    JitOptContext *ctx, JitOptRef ref);
+extern void _Py_uop_alloc_build_profitability_plan(JitOptContext *ctx);
+extern bool _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(
+    JitOptContext *ctx, JitOptRef ref);
+extern void _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(
+    JitOptContext *ctx, JitOptRef ref);
 extern JitOptRef _Py_uop_alloc_materialize_virtual_float(
+    JitOptContext *ctx, JitOptRef ref);
+extern bool _Py_uop_alloc_is_fresh_materialized_float(
     JitOptContext *ctx, JitOptRef ref);
 extern const JitVirtualObject *_Py_uop_alloc_resolve_virtual(
     JitOptContext *ctx, JitOptRef ref);
