@@ -1150,14 +1150,7 @@
                      _Py_uop_alloc_context_stack_virtual_count(
                          ctx, stack_pointer) == 1)
                 {
-                    JitOptRef concrete =
-                    _Py_uop_alloc_materialize_virtual_float(
-                        ctx, guarded_right);
-                    assert(!PyJitRef_IsNull(concrete));
-                    assert(!PyJitRef_IsInvalid(concrete));
-                    ADD_OP(_MATERIALIZE_VIRTUAL_FLOAT, 0, 0);
-                    ADD_OP(_GUARD_NOS_FLOAT, oparg, 0);
-                    guarded_right = concrete;
+                    ADD_OP(_GUARD_NOS_FLOAT_VIRTUAL_STACK, oparg, 0);
                 }
                 else {
                     ctx->retry_without_virtuals = true;
@@ -1179,6 +1172,16 @@
             assert(_Py_uop_alloc_is_virtual(ctx, right));
             assert(find_unique_virtual_fast_local_alias(ctx, right) ==
                (int)this_instr->operand0);
+            sym_set_type(left, &PyFloat_Type);
+            break;
+        }
+
+        case _GUARD_NOS_FLOAT_VIRTUAL_STACK: {
+            JitOptRef right;
+            JitOptRef left;
+            right = stack_pointer[-1];
+            left = stack_pointer[-2];
+            assert(_Py_uop_alloc_is_virtual(ctx, right));
             sym_set_type(left, &PyFloat_Type);
             break;
         }
@@ -2604,8 +2607,10 @@
             sub_st = stack_pointer[-1];
             list_st = stack_pointer[-2];
             value = stack_pointer[-3];
-            (void)value;
-            if (_Py_uop_alloc_context_virtual_count(ctx, stack_pointer) > 0) {
+            if (_Py_uop_alloc_is_virtual(ctx, value)) {
+                ADD_OP(_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT, oparg, 0);
+            }
+            else if (_Py_uop_alloc_context_virtual_count(ctx, stack_pointer) > 0) {
                 ADD_OP(_STORE_SUBSCR_LIST_INT_FLOAT, oparg, 0);
             }
             ls = list_st;
@@ -2627,7 +2632,29 @@
             sub_st = stack_pointer[-1];
             list_st = stack_pointer[-2];
             value = stack_pointer[-3];
-            assert(!_Py_uop_alloc_is_virtual(ctx, value));
+            if (_Py_uop_alloc_is_virtual(ctx, value)) {
+                ADD_OP(_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT, oparg, 0);
+            }
+            ls = list_st;
+            ss = sub_st;
+            CHECK_STACK_BOUNDS(-1);
+            stack_pointer[-3] = ls;
+            stack_pointer[-2] = ss;
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            break;
+        }
+
+        case _STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT: {
+            JitOptRef sub_st;
+            JitOptRef list_st;
+            JitOptRef value;
+            JitOptRef ls;
+            JitOptRef ss;
+            sub_st = stack_pointer[-1];
+            list_st = stack_pointer[-2];
+            value = stack_pointer[-3];
+            assert(_Py_uop_alloc_is_virtual(ctx, value));
             ls = list_st;
             ss = sub_st;
             CHECK_STACK_BOUNDS(-1);

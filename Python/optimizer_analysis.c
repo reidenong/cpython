@@ -318,6 +318,13 @@ virtuals_cross_unsafe_barrier(
              * local and TOS before either its error or side exit. */
             continue;
         }
+        if (uop->opcode == _GUARD_NOS_FLOAT_VIRTUAL_STACK ||
+            uop->opcode == _STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT)
+        {
+            /* These uops reconstruct their raw stack input before taking any
+             * error or deoptimization edge. */
+            continue;
+        }
         if (raw_is_live && is_virtualization_barrier(uop)) {
             return true;
         }
@@ -369,6 +376,14 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _GUARD_TOS_FLOAT:
         case _GUARD_NOS_FLOAT:
         case _GUARD_NOS_FLOAT_VIRTUAL_FAST:
+        case _GUARD_NOS_FLOAT_VIRTUAL_STACK:
+        case _GUARD_TOS_INT:
+        case _GUARD_NOS_LIST:
+            /* Integer-index and list-container guards may have a raw store
+             * value below them.  Their transfer rules must prove and remove
+             * the guards; otherwise the post-transfer barrier audit rejects
+             * the trace, so this does not permit a raw value across a real
+             * side exit. */
         case _BINARY_OP_ADD_FLOAT:
         case _BINARY_OP_SUBTRACT_FLOAT:
         case _BINARY_OP_MULTIPLY_FLOAT:
@@ -403,6 +418,9 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _LOAD_FAST_AND_CLEAR_VIRTUAL_FLOAT:
         case _SWAP_FAST_VIRTUAL_FLOAT:
         case _SWAP_FAST:
+        case _STORE_SUBSCR_LIST_INT:
+        case _STORE_SUBSCR_LIST_INT_FLOAT:
+        case _STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT:
             return true;
         default:
             return false;
@@ -419,6 +437,7 @@ uop_preserves_virtual_fast_locals(const _PyUOpInstruction *uop)
         case _BINARY_OP_SUBSCR_LIST_INT:
         case _STORE_SUBSCR_LIST_INT:
         case _STORE_SUBSCR_LIST_INT_FLOAT:
+        case _STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT:
             return true;
         default:
             return false;

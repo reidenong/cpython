@@ -936,6 +936,23 @@ dummy_func(
             }
         }
 
+        tier2 op(_GUARD_NOS_FLOAT_VIRTUAL_STACK,
+                 (left, right -- left, right)) {
+            /* The right operand is a temporary raw double rather than a
+             * shadow-local alias.  Keep it raw when the guard succeeds.  On
+             * the cold failing path, create the box that Tier 1 expects
+             * before leaving the executor. */
+            PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+            if (!PyFloat_CheckExact(left_o)) {
+                double raw = _PyJIT_UnpackRawDouble(right);
+                PyObject *boxed = PyFloat_FromDouble(raw);
+                DEAD(right);
+                ERROR_IF(boxed == NULL);
+                right = PyStackRef_FromPyObjectSteal(boxed);
+                EXIT_IF(true);
+            }
+        }
+
         op(_GUARD_TOS_FLOAT, (value -- value)) {
             PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
             EXIT_IF(!PyFloat_CheckExact(value_o));
@@ -1900,6 +1917,65 @@ dummy_func(
             ls = list_st;
             ss = sub_st;
             _Py_DECREF_SPECIALIZED(old_value, _PyFloat_ExactDealloc);
+        }
+
+        tier2 op(_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT,
+                 (value, list_st, sub_st -- ls, ss)) {
+            /* Consume a virtual float directly at a list store.  If the old
+             * exact-float element is owned only by this list, mutating its
+             * payload is unobservable and avoids both materialization and a
+             * list-element allocation.  Every uncertain case is cold: box
+             * the raw value and resume at the original STORE_SUBSCR so Python
+             * retains its normal aliasing, bounds, and error semantics. */
+            double raw = _PyJIT_UnpackRawDouble(value);
+            PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
+            PyObject *list = PyStackRef_AsPyObjectBorrow(list_st);
+            assert(PyLong_CheckExact(sub));
+            assert(PyList_CheckExact(list));
+
+            bool updated = false;
+            Py_ssize_t index = _PyLong_CompactValue((PyLongObject *)sub);
+            if (LOCK_OBJECT(list)) {
+                Py_ssize_t len = PyList_GET_SIZE(list);
+                if (index < 0) {
+                    index += len;
+                }
+                if (index >= 0 && index < len) {
+                    PyObject *old_value = PyList_GET_ITEM(list, index);
+                    if (PyFloat_CheckExact(old_value) &&
+                        _PyObject_IsUniquelyReferenced(old_value))
+                    {
+                        ((PyFloatObject *)old_value)->ob_fval = raw;
+                        updated = true;
+                    }
+                }
+                UNLOCK_OBJECT(list);
+            }
+
+            if (!updated) {
+                /* Replace the opaque carrier before deoptimizing.  The
+                 * ordinary Tier-1 STORE_SUBSCR then handles aliased elements,
+                 * unusual contents, and invalid indexes without ever seeing
+                * raw bits in a Python stack slot. */
+                PyObject *boxed = PyFloat_FromDouble(raw);
+                if (boxed == NULL) {
+                    /* STORE_SUBSCR consumes all three inputs when it raises.
+                     * The raw value cannot be closed as a PyStackRef. */
+                    PyStackRef_CLOSE(sub_st);
+                    PyStackRef_CLOSE(list_st);
+                    DEAD(value);
+                    ERROR_IF(true);
+                }
+                DEAD(value);
+                value = PyStackRef_FromPyObjectSteal(boxed);
+                DEOPT_IF(true);
+            }
+
+            STAT_INC(STORE_SUBSCR, hit);
+            DEAD(value);
+            INPUTS_DEAD();
+            ls = list_st;
+            ss = sub_st;
         }
 
         macro(STORE_SUBSCR_DICT) =

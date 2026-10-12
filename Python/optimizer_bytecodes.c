@@ -315,8 +315,12 @@ dummy_func(void) {
     }
 
     op(_STORE_SUBSCR_LIST_INT, (value, list_st, sub_st -- ls, ss)) {
-        (void)value;
-        if (_Py_uop_alloc_context_virtual_count(ctx, stack_pointer) > 0) {
+        if (_Py_uop_alloc_is_virtual(ctx, value)) {
+            /* The raw-aware store either updates a uniquely list-owned exact
+             * float in place or reconstructs the value before a cold deopt. */
+            ADD_OP(_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT, oparg, 0);
+        }
+        else if (_Py_uop_alloc_context_virtual_count(ctx, stack_pointer) > 0) {
             /* The guarded variant closes only an exact old float, so shadow
              * locals cannot be observed by an arbitrary destructor. */
             ADD_OP(_STORE_SUBSCR_LIST_INT_FLOAT, oparg, 0);
@@ -327,7 +331,19 @@ dummy_func(void) {
 
     op(_STORE_SUBSCR_LIST_INT_FLOAT,
        (value, list_st, sub_st -- ls, ss)) {
-        assert(!_Py_uop_alloc_is_virtual(ctx, value));
+        if (_Py_uop_alloc_is_virtual(ctx, value)) {
+            /* Re-optimized traces may already contain the shadow-safe float
+             * store.  Preserve the raw value instead of materializing it
+             * merely because this is the specialized input spelling. */
+            ADD_OP(_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT, oparg, 0);
+        }
+        ls = list_st;
+        ss = sub_st;
+    }
+
+    op(_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT,
+       (value, list_st, sub_st -- ls, ss)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, value));
         ls = list_st;
         ss = sub_st;
     }
@@ -468,14 +484,10 @@ dummy_func(void) {
                 _Py_uop_alloc_context_stack_virtual_count(
                     ctx, stack_pointer) == 1)
             {
-                JitOptRef concrete =
-                    _Py_uop_alloc_materialize_virtual_float(
-                        ctx, guarded_right);
-                assert(!PyJitRef_IsNull(concrete));
-                assert(!PyJitRef_IsInvalid(concrete));
-                ADD_OP(_MATERIALIZE_VIRTUAL_FLOAT, 0, 0);
-                ADD_OP(_GUARD_NOS_FLOAT, oparg, 0);
-                guarded_right = concrete;
+                /* A temporary raw value has no pre-existing Python identity.
+                 * The specialized guard can therefore box it only if the
+                 * concrete NOS operand fails its exact-float check. */
+                ADD_OP(_GUARD_NOS_FLOAT_VIRTUAL_STACK, oparg, 0);
             }
             else {
                 ctx->retry_without_virtuals = true;
@@ -492,6 +504,12 @@ dummy_func(void) {
         assert(_Py_uop_alloc_is_virtual(ctx, right));
         assert(find_unique_virtual_fast_local_alias(ctx, right) ==
                (int)this_instr->operand0);
+        sym_set_type(left, &PyFloat_Type);
+    }
+
+    op(_GUARD_NOS_FLOAT_VIRTUAL_STACK,
+       (left, right -- left, right)) {
+        assert(_Py_uop_alloc_is_virtual(ctx, right));
         sym_set_type(left, &PyFloat_Type);
     }
 

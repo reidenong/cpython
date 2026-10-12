@@ -4503,22 +4503,27 @@ class TestUopsOptimization(unittest.TestCase):
     )
     def test_float_raw_rhs_does_not_mutate_list_owned_box(self):
         def testfunc(args):
-            a, b, n = args
-            values = [1.0]
+            a, b, values, n = args
             for _ in range(n):
                 values[0] += a * b
             return values[0]
 
+        original = float("1.0")
+        values = [original]
         res, ex = self._run_with_optimizer(
-            testfunc, (2.0, 3.0, TIER2_THRESHOLD),
+            testfunc, (2.0, 3.0, values, TIER2_THRESHOLD),
             virtual_mode="optimistic")
         self.assertEqual(res, 1.0 + 6.0 * TIER2_THRESHOLD)
+        self.assertEqual(original, 1.0)
+        self.assertIsNot(values[0], original)
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
-        # The list still owns its old float, so it is not a unique box. The
-        # product must be materialized rather than mutating the aliased value.
+        # The first aliased store deoptimizes and installs a fresh box. Later
+        # iterations can mutate that uniquely list-owned exact float, but the
+        # externally held original must remain immutable.
         self.assertNotIn("_BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW", uops)
-        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertIn("_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
 
     @unittest.skipUnless(
         sys.maxsize > 2**32 and
@@ -4907,7 +4912,7 @@ class TestUopsOptimization(unittest.TestCase):
                 self.assertEqual(testfunc((float("nan"), 1.0, 10)), 10)
         reset_code(testfunc)
 
-    def test_float_virtual_result_materializes_before_unknown_guard(self):
+    def test_float_virtual_result_stays_raw_across_unknown_guard(self):
         def testfunc(args):
             a, b, total, n = args
             for _ in range(n):
@@ -4921,11 +4926,12 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
         self.assertTrue(has_virtual_float_multiply(uops))
-        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertIn("_GUARD_NOS_FLOAT_VIRTUAL_STACK", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
         self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
         self.assertNotIn("_POP_TOP_VIRTUAL_FLOAT", uops)
-        # The materialization precedes the guard for the loop-carried total.
-        # A later int value must deopt with an entirely valid object stack.
+        # A later int value takes the cold guard path. It must box the raw
+        # product before deoptimizing so Tier 1 sees a valid object stack.
         self.assertEqual(testfunc((2.0, 3.0, 0, 1)), 6.0)
 
     @unittest.skipUnless(
@@ -4935,10 +4941,13 @@ class TestUopsOptimization(unittest.TestCase):
         sys.float_info.max_exp == 1024,
         "requires the virtual-float raw-double carrier",
     )
-    def test_float_virtual_materializes_before_heap_store(self):
+    def test_float_virtual_list_store_stays_raw(self):
         def testfunc(args):
             a, b, box, n = args
             for _ in range(n):
+                # Establish the exact-list fact before the raw value reaches
+                # STORE_SUBSCR, as happens in the nbody update loops.
+                box[0]
                 box[0] = a * b
             return box[0]
 
@@ -4951,14 +4960,42 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertTrue(has_virtual_float_multiply(uops))
         self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
-        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
-        self.assertLess(
-            uops.index("_MATERIALIZE_VIRTUAL_FLOAT"),
-            uops.index("_STORE_SUBSCR_LIST_INT"),
-        )
-        # The product is below the list and index at the escape point.  It is
-        # moved to TOS for materialization and then restored before the store.
-        self.assertGreaterEqual(count_ops(ex, "_SWAP_3"), 2)
+        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 0)
+        self.assertIn("_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT", uops)
+
+    @unittest.skipUnless(
+        sys.maxsize > 2**32 and
+        sys.float_info.radix == 2 and
+        sys.float_info.mant_dig == 53 and
+        sys.float_info.max_exp == 1024,
+        "requires the virtual-float raw-double carrier",
+    )
+    def test_float_virtual_list_store_reconstructs_before_cold_exit(self):
+        def testfunc(args):
+            a, b, box, n = args
+            for _ in range(n):
+                # This valid read proves the container type independently of
+                # the possibly invalid constant index used by the store.
+                box[0]
+                box[1] = a * b
+            return box[1]
+
+        box = [0.0, 0.0]
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, box, TIER2_THRESHOLD),
+            virtual_mode="optimistic")
+        self.assertEqual(res, 6.0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_STORE_SUBSCR_LIST_INT_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+
+        # The raw-aware store must reconstruct its input before leaving the
+        # executor, so the generic STORE_SUBSCR can report normal exceptions.
+        with self.assertRaises(IndexError):
+            testfunc((2.0, 3.0, [0.0], 1))
+        mixed = [0.0, object()]
+        self.assertEqual(testfunc((2.0, 3.0, mixed, 1)), 6.0)
 
     @unittest.skipUnless(
         sys.maxsize > 2**32 and
@@ -4971,10 +5008,10 @@ class TestUopsOptimization(unittest.TestCase):
         def testfunc(args):
             a, b, box, n = args
             for _ in range(n):
-                box[0] = a * b
-            return box[0]
+                box["value"] = a * b
+            return box["value"]
 
-        box = [0.0]
+        box = {"value": 0.0}
         res, ex = self._run_with_optimizer(
             testfunc, (2.0, 3.0, box, TIER2_THRESHOLD),
             virtual_mode="heuristic")
@@ -4998,10 +5035,10 @@ class TestUopsOptimization(unittest.TestCase):
         def testfunc(args):
             a, b, box, n = args
             for _ in range(n):
-                box[0] = (a * b) + (a * b)
-            return box[0]
+                box["value"] = (a * b) + (a * b)
+            return box["value"]
 
-        box = [0.0]
+        box = {"value": 0.0}
         res, ex = self._run_with_optimizer(
             testfunc, (2.0, 3.0, box, TIER2_THRESHOLD),
             virtual_mode="heuristic")
@@ -5172,7 +5209,9 @@ class TestUopsOptimization(unittest.TestCase):
                 total += c + a * b
             return total
 
-        res, ex = self._run_with_optimizer(testfunc, (2.0, 3.0, 4.0, TIER2_THRESHOLD))
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, 4.0, TIER2_THRESHOLD),
+            virtual_mode="0")
         self.assertAlmostEqual(res, TIER2_THRESHOLD * 10.0)
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
@@ -5186,9 +5225,9 @@ class TestUopsOptimization(unittest.TestCase):
         "requires the virtual-float raw-double carrier",
     )
     def test_float_add_non_unique_is_virtualized(self):
-        # Both operands of a + b are borrowed locals. The expression result is
-        # virtualized, then materialized before the unknown loop-carried total
-        # guard. The subsequent += can still reuse that unique box.
+        # Both operands of a + b are borrowed locals. The expression and the
+        # subsequent loop-carried addition remain raw across the specialized
+        # cold-materializing guard.
         def testfunc(args):
             a, b, n = args
             total = 0.0
@@ -5203,8 +5242,10 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
         self.assertIn("_BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_BOXED", uops)
-        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
-        self.assertIn("_BINARY_OP_ADD_FLOAT_INPLACE_RIGHT", uops)
+        self.assertIn("_GUARD_NOS_FLOAT_VIRTUAL_STACK", uops)
+        self.assertIn("_BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertNotIn("_BINARY_OP_ADD_FLOAT_INPLACE_RIGHT", uops)
         self.assertNotIn("_BINARY_OP_ADD_FLOAT", uops)
         self.assertNotIn("_BINARY_OP_ADD_FLOAT_INPLACE", uops)
 
@@ -5233,7 +5274,9 @@ class TestUopsOptimization(unittest.TestCase):
                 total += c - a * b
             return total
 
-        res, ex = self._run_with_optimizer(testfunc, (2.0, 3.0, 1.0, TIER2_THRESHOLD))
+        res, ex = self._run_with_optimizer(
+            testfunc, (2.0, 3.0, 1.0, TIER2_THRESHOLD),
+            virtual_mode="0")
         self.assertAlmostEqual(res, TIER2_THRESHOLD * -5.0)
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
@@ -5255,10 +5298,9 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertIn("_BINARY_OP_MULTIPLY_FLOAT_INPLACE", uops)
 
-    def test_float_multiply_fresh_materialized_rhs_returns_to_virtual(self):
-        # The guard before * materializes the virtual (a + b).  Because that
-        # box is fresh and unique, multiplication consumes it into another raw
-        # result instead of retaining the temporary box through inplace-right.
+    def test_float_multiply_raw_rhs_stays_virtual_across_guard(self):
+        # The guard before * keeps (a + b) raw on its hot path. Multiplication
+        # consumes that raw value directly instead of creating a temporary box.
         def testfunc(args):
             a, b, c, n = args
             total = 0.0
@@ -5273,7 +5315,9 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
         self.assertIn(
-            "_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED", uops)
+            "_BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW", uops)
+        self.assertIn("_GUARD_NOS_FLOAT_VIRTUAL_STACK", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
         self.assertNotIn("_BINARY_OP_MULTIPLY_FLOAT_INPLACE_RIGHT", uops)
 
     def test_float_inplace_chain_propagation(self):
@@ -5320,7 +5364,8 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertTrue(has_virtual_float_multiply(uops))
         self.assertIn("_UNARY_NEGATIVE_FLOAT_VIRTUAL", uops)
-        self.assertIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
+        self.assertIn("_GUARD_NOS_FLOAT_VIRTUAL_STACK", uops)
+        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
         self.assertNotIn("_UNARY_NEGATIVE_FLOAT_INPLACE", uops)
 
     def test_float_negate_no_inplace_non_unique(self):
