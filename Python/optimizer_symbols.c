@@ -272,49 +272,6 @@ _Py_uop_alloc_set_concrete(JitOptContext *ctx, JitOptRef ref)
 }
 
 static JitVirtualRef
-profitability_find(JitOptContext *ctx, JitVirtualRef virtual_ref)
-{
-    /* Path compression keeps repeated component queries effectively cheap. */
-    assert(virtual_ref != JIT_VIRTUAL_REF_NULL);
-    assert(virtual_ref <= ctx->virtuals.virtual_curr_number);
-    JitVirtualObject *object = &ctx->virtuals.arena[virtual_ref - 1];
-    JitVirtualRef parent = object->profitability_parent;
-    assert(parent != JIT_VIRTUAL_REF_NULL);
-    if (parent != virtual_ref) {
-        object->profitability_parent = profitability_find(ctx, parent);
-    }
-    return object->profitability_parent;
-}
-
-static void
-profitability_union(JitOptContext *ctx, JitVirtualRef first,
-                    JitVirtualRef second)
-{
-    if (first == JIT_VIRTUAL_REF_NULL || second == JIT_VIRTUAL_REF_NULL) {
-        return;
-    }
-    JitVirtualRef first_root = profitability_find(ctx, first);
-    JitVirtualRef second_root = profitability_find(ctx, second);
-    if (first_root == second_root) {
-        return;
-    }
-    /* Keeping the lower descriptor as the root makes debug output and tests
-     * deterministic; the choice has no semantic effect. */
-    if (second_root < first_root) {
-        JitVirtualRef temporary = first_root;
-        first_root = second_root;
-        second_root = temporary;
-    }
-    JitVirtualObject *root = &ctx->virtuals.arena[first_root - 1];
-    JitVirtualObject *merged = &ctx->virtuals.arena[second_root - 1];
-    root->profitability_virtual_ops +=
-        merged->profitability_virtual_ops;
-    root->profitability_materializations +=
-        merged->profitability_materializations;
-    merged->profitability_parent = first_root;
-}
-
-static JitVirtualRef
 new_virtual_float(JitOptContext *ctx, JitOptRef ref,
                   JitOptRef left, JitOptRef right)
 {
@@ -344,22 +301,7 @@ new_virtual_float(JitOptContext *ctx, JitOptRef ref,
     JitVirtualObject *virtual_object = &ctx->virtuals.arena[virtual_index];
     virtual_object->kind = JIT_VIRTUAL_FLOAT;
     virtual_object->float_is_nonnegative_or_nan = false;
-    virtual_object->profitability_parent = virtual_ref;
-    virtual_object->profitability_virtual_ops = 1;
-    virtual_object->profitability_materializations = 0;
-    virtual_object->producer_trace_index =
-        ctx->current_trace_index >= 0 &&
-        ctx->current_trace_index < UOP_MAX_TRACE_LENGTH
-        ? (uint16_t)ctx->current_trace_index : UINT16_MAX;
     ctx->allocations[allocation] = virtual_ref;
-
-    /* A raw-producing operation and any virtual operands must receive one
-     * component decision: rejecting only the result would require a separate
-     * raw-input/concrete-output runtime uop. */
-    profitability_union(
-        ctx, virtual_ref, _Py_uop_alloc_get(ctx, left).virtual_ref);
-    profitability_union(
-        ctx, virtual_ref, _Py_uop_alloc_get(ctx, right).virtual_ref);
     return virtual_ref;
 }
 
@@ -374,37 +316,6 @@ _Py_uop_alloc_new_virtual_float_from_inputs(
     JitOptContext *ctx, JitOptRef ref, JitOptRef left, JitOptRef right)
 {
     return new_virtual_float(ctx, ref, left, right);
-}
-
-void
-_Py_uop_alloc_note_materialization(JitOptContext *ctx, JitOptRef ref)
-{
-    JitVirtualRef virtual_ref = _Py_uop_alloc_get(ctx, ref).virtual_ref;
-    if (virtual_ref == JIT_VIRTUAL_REF_NULL) {
-        return;
-    }
-    JitVirtualRef root_ref = profitability_find(ctx, virtual_ref);
-    JitVirtualObject *root = &ctx->virtuals.arena[root_ref - 1];
-    root->profitability_materializations++;
-}
-
-void
-_Py_uop_alloc_build_profitability_plan(JitOptContext *ctx)
-{
-    assert(ctx->virtualization_plan != NULL);
-    for (int i = 0; i < ctx->virtuals.virtual_curr_number; i++) {
-        JitVirtualObject *object = &ctx->virtuals.arena[i];
-        if (object->producer_trace_index == UINT16_MAX) {
-            continue;
-        }
-        JitVirtualRef root_ref = profitability_find(ctx, (JitVirtualRef)(i + 1));
-        JitVirtualObject *root = &ctx->virtuals.arena[root_ref - 1];
-        int producer = object->producer_trace_index;
-        ctx->virtualization_plan->producer_seen[producer] = true;
-        ctx->virtualization_plan->producer_profitable[producer] =
-            root->profitability_virtual_ops >
-                root->profitability_materializations;
-    }
 }
 
 bool
@@ -450,7 +361,6 @@ _Py_uop_alloc_materialize_virtual_float(JitOptContext *ctx, JitOptRef ref)
     {
         return PyJitRef_NULL;
     }
-    _Py_uop_alloc_note_materialization(ctx, ref);
     JitOptRef concrete = PyJitRef_MakeUnique(
         _Py_uop_sym_new_type(ctx, &PyFloat_Type));
     assert(!_Py_uop_alloc_is_virtual(ctx, concrete));
@@ -1988,9 +1898,6 @@ _Py_uop_abstractcontext_init(JitOptContext *ctx, _PyBloomFilter *dependencies)
     ctx->virtuals.virtual_max_number = VIRTUAL_ARENA_SIZE;
     ctx->virtual_floats_enabled = false;
     ctx->retry_without_virtuals = false;
-    ctx->virtualization_plan = NULL;
-    ctx->collect_virtualization_profitability = false;
-    ctx->current_trace_index = -1;
     memset(ctx->virtual_fast_local_accessed, 0,
            sizeof(ctx->virtual_fast_local_accessed));
     /* Use bool assignments rather than relying on the byte representation of
@@ -2725,48 +2632,6 @@ _Py_uop_virtualization_test(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignor
             TEST_PREDICATE(
                 _PyUop_Uncached[entry->opcode] == opcode,
                 "virtual float binary cache form has an invalid base uop"
-            );
-        }
-    }
-
-    /* Mixed inplace operations still consume a raw operand, but preserve the
-     * other operand's unique box as their concrete result. Validate both
-     * operand orientations even though current Python traces most commonly
-     * reach the BOXED_RAW form. */
-    static const int mixed_inplace_opcodes[] = {
-        _BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW,
-        _BINARY_OP_ADD_FLOAT_INPLACE_RAW_BOXED,
-        _BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW,
-        _BINARY_OP_SUBTRACT_FLOAT_INPLACE_RAW_BOXED,
-        _BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW,
-        _BINARY_OP_MULTIPLY_FLOAT_INPLACE_RAW_BOXED,
-    };
-    for (size_t i = 0; i < Py_ARRAY_LENGTH(mixed_inplace_opcodes); i++) {
-        int opcode = mixed_inplace_opcodes[i];
-        TEST_PREDICATE(
-            _PyUop_Flags[opcode] == 0,
-            "mixed inplace float uop unexpectedly exits or escapes"
-        );
-        TEST_PREDICATE(
-            _PyUop_num_popped(opcode, 0) == 2,
-            "mixed inplace float uop has the wrong input stack effect"
-        );
-        for (int incoming = 0; incoming <= MAX_CACHED_REGISTER; incoming++) {
-            int depth = _PyUop_Caching[opcode].best[incoming];
-            TEST_PREDICATE(
-                depth >= 0 && depth < MAX_CACHED_REGISTER,
-                "mixed inplace float uop has no usable cache form"
-            );
-            const _PyUopTOSentry *entry =
-                &_PyUop_Caching[opcode].entries[depth];
-            TEST_PREDICATE(
-                entry->output == MAX_CACHED_REGISTER &&
-                    entry->exit == depth,
-                "mixed inplace float uop has an invalid cache effect"
-            );
-            TEST_PREDICATE(
-                _PyUop_Uncached[entry->opcode] == opcode,
-                "mixed inplace float cache form has an invalid base uop"
             );
         }
     }

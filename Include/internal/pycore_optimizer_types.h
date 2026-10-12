@@ -177,14 +177,6 @@ typedef struct {
     /* Facts about the raw payload which are needed by consumers whose Python
      * result type depends on the value rather than only its object type. */
     uint8_t float_is_nonnegative_or_nan;
-    /* Profitability is tracked per connected raw-value component.  Each
-     * descriptor starts as its own union-find root and is joined to virtual
-     * inputs when an arithmetic result extends an existing raw chain. */
-    JitVirtualRef profitability_parent;
-    uint32_t profitability_virtual_ops;
-    uint32_t profitability_materializations;
-    /* Stable input-trace position used to replay the decision on pass two. */
-    uint16_t producer_trace_index;
 } JitVirtualObject;
 
 /* Trace-local storage for descriptors.  It is bump-allocated alongside the
@@ -194,13 +186,6 @@ typedef struct {
     int virtual_max_number;
     JitVirtualObject arena[VIRTUAL_ARENA_SIZE];
 } JitVirtualArena;
-
-/* Fixed-size output of the optimistic profiling pass.  Trace positions are
- * stable across reinitializing the abstract symbol and virtual arenas. */
-typedef struct {
-    bool producer_seen[UOP_MAX_TRACE_LENGTH];
-    bool producer_profitable[UOP_MAX_TRACE_LENGTH];
-} JitVirtualizationPlan;
 
 typedef struct _Py_UOpsAbstractFrame {
     bool globals_watched;

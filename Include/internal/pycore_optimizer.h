@@ -100,13 +100,6 @@ typedef struct _JitOptContext {
     bool virtual_floats_enabled;
     bool retry_without_virtuals;
 
-    /* The heuristic first profiles an optimistic pass, then replays only
-     * producer sites selected in this trace-indexed plan.  A NULL plan means
-     * the legacy optimistic policy. */
-    JitVirtualizationPlan *virtualization_plan;
-    bool collect_virtualization_profitability;
-    int current_trace_index;
-
     /*
      * A shadow local may survive _JUMP_TO_TOP only if its virtual store is the
      * first access to that local in the linear trace.  In that case the next
@@ -514,9 +507,6 @@ extern JitVirtualRef _Py_uop_alloc_new_virtual_float(
     JitOptContext *ctx, JitOptRef ref);
 extern JitVirtualRef _Py_uop_alloc_new_virtual_float_from_inputs(
     JitOptContext *ctx, JitOptRef ref, JitOptRef left, JitOptRef right);
-extern void _Py_uop_alloc_note_materialization(
-    JitOptContext *ctx, JitOptRef ref);
-extern void _Py_uop_alloc_build_profitability_plan(JitOptContext *ctx);
 extern bool _Py_uop_alloc_virtual_float_is_nonnegative_or_nan(
     JitOptContext *ctx, JitOptRef ref);
 extern void _Py_uop_alloc_mark_virtual_float_nonnegative_or_nan(

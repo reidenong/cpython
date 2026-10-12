@@ -391,17 +391,11 @@ uop_handles_virtual_float(const _PyUOpInstruction *uop)
         case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_BOXED:
         case _BINARY_OP_ADD_FLOAT_VIRTUAL_BOXED_RAW:
         case _BINARY_OP_ADD_FLOAT_VIRTUAL_RAW_RAW:
-        case _BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW:
-        case _BINARY_OP_ADD_FLOAT_INPLACE_RAW_BOXED:
         case _BINARY_OP_SUBTRACT_FLOAT_VIRTUAL:
-        case _BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW:
-        case _BINARY_OP_SUBTRACT_FLOAT_INPLACE_RAW_BOXED:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_BOXED:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_BOXED:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_BOXED_RAW:
         case _BINARY_OP_MULTIPLY_FLOAT_VIRTUAL_RAW_RAW:
-        case _BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW:
-        case _BINARY_OP_MULTIPLY_FLOAT_INPLACE_RAW_BOXED:
         case _BINARY_OP_POWER_FLOAT_VIRTUAL_RAW_CONST:
         case _UNARY_NEGATIVE:
         case _UNARY_NEGATIVE_FLOAT_VIRTUAL:
@@ -738,23 +732,7 @@ optimize_pop_top(JitOptContext *ctx, _PyUOpInstruction *this_instr, JitOptRef va
 bool
 _Py_uop_can_virtualize_float_result(JitOptContext *ctx)
 {
-    if (!ctx->virtual_floats_enabled) {
-        return false;
-    }
-    /* A NULL plan is the legacy optimistic policy.  The profiling pass also
-     * admits every candidate so it can observe the complete raw-value graph. */
-    if (ctx->virtualization_plan == NULL ||
-        ctx->collect_virtualization_profitability)
-    {
-        return true;
-    }
-    /* Pass two makes the decision at the same input-trace position.  Missing
-     * entries are rejected conservatively: they were not proven profitable
-     * by the optimistic pass. */
-    int producer = ctx->current_trace_index;
-    return producer >= 0 && producer < UOP_MAX_TRACE_LENGTH &&
-        ctx->virtualization_plan->producer_seen[producer] &&
-        ctx->virtualization_plan->producer_profitable[producer];
+    return ctx->virtual_floats_enabled;
 }
 
 /* Look up name via super (normal case from supercheck where
@@ -883,9 +861,7 @@ optimize_uops(
     int curr_stacklen,
     _PyUOpInstruction *output,
     _PyBloomFilter *dependencies,
-    bool enable_virtual_floats,
-    JitVirtualizationPlan *virtualization_plan,
-    bool collect_virtualization_profitability
+    bool enable_virtual_floats
 )
 {
     assert(!PyErr_Occurred());
@@ -903,9 +879,6 @@ optimize_uops(
                          _setup_optimizer_watchers, NULL);
 
     _Py_uop_abstractcontext_init(ctx, dependencies);
-    ctx->virtualization_plan = virtualization_plan;
-    ctx->collect_virtualization_profitability =
-        collect_virtualization_profitability;
     /* Platform support and debug-stack compatibility are checked once per
      * pass; individual producer rules can then use a cheap boolean gate. */
     ctx->virtual_floats_enabled =
@@ -934,7 +907,6 @@ optimize_uops(
 
     for (int i = 0; i < trace_len; i++) {
         this_instr = &trace[i];
-        ctx->current_trace_index = i;
         if (ctx->done) {
             // Don't do any more optimization, but
             // we still need to reach a terminator for corrctness.
@@ -987,8 +959,6 @@ optimize_uops(
                  local++)
             {
                 if (_Py_uop_alloc_is_virtual(ctx, ctx->frame->locals[local])) {
-                    _Py_uop_alloc_note_materialization(
-                        ctx, ctx->frame->locals[local]);
                     add_op(ctx, this_instr,
                            _MATERIALIZE_VIRTUAL_FAST_LOCAL, local, 0);
                     ctx->frame->locals[local] =
@@ -1102,13 +1072,6 @@ optimize_uops(
         DPRINTF(1, "virtual float remained live at the end; retrying\n");
         _Py_uop_abstractcontext_fini(ctx);
         return OPTIMIZE_RETRY_WITHOUT_VIRTUALS;
-    }
-
-    if (ctx->collect_virtualization_profitability &&
-        ctx->virtualization_plan != NULL)
-    {
-        /* Export decisions before fini discards the trace-local descriptors. */
-        _Py_uop_alloc_build_profitability_plan(ctx);
     }
 
     /* Either reached the end or cannot optimize further, but there
@@ -1254,77 +1217,24 @@ _Py_uop_analyze_and_optimize(
 {
     OPT_STAT_INC(optimizer_attempts);
 
-    enum {
-        VIRTUAL_FLOATS_DISABLED,
-        VIRTUAL_FLOATS_HEURISTIC,
-        VIRTUAL_FLOATS_OPTIMISTIC,
-    } virtual_float_mode = VIRTUAL_FLOATS_HEURISTIC;
     /* Private A/B switch for the virtual-float experiment.  Reading it while
-     * compiling a trace does not affect the generated executor's hot path.
-     * 0 disables virtualization, 2/optimistic selects the old policy, and
-     * unset/1/heuristic selects the profitability pass. */
+     * compiling a trace does not affect the generated executor's hot path. */
     char *virtual_floats = Py_GETENV("PYTHON_JIT_VIRTUAL_FLOATS");
-    if (virtual_floats != NULL && *virtual_floats == '0') {
-        virtual_float_mode = VIRTUAL_FLOATS_DISABLED;
-    }
-    else if (virtual_floats != NULL &&
-             (*virtual_floats == '2' ||
-              strcmp(virtual_floats, "optimistic") == 0))
-    {
-        virtual_float_mode = VIRTUAL_FLOATS_OPTIMISTIC;
-    }
+    bool enable_virtual_floats =
+        virtual_floats == NULL || *virtual_floats != '0';
 
     int trace_length = length;
-    if (virtual_float_mode == VIRTUAL_FLOATS_HEURISTIC) {
-        /* The first pass measures a complete optimistic virtual graph.  The
-         * second pass starts from fresh abstract state and emits only the
-         * connected components whose virtual work exceeds reconstruction. */
-        JitVirtualizationPlan plan = {0};
-        length = optimize_uops(
-            tstate, buffer, trace_length, curr_stacklen, output, dependencies,
-            true, &plan, true);
-        bool has_virtual_candidates = false;
-        bool has_profitable_candidates = false;
-        for (int i = 0; i < trace_length; i++) {
-            if (plan.producer_seen[i]) {
-                has_virtual_candidates = true;
-                if (plan.producer_profitable[i]) {
-                    has_profitable_candidates = true;
-                }
-            }
-        }
-        /* Avoid a redundant optimizer pass for the overwhelmingly common
-         * traces with no virtual-float producer.  Besides reducing compile
-         * cost, this preserves the optimizer's established single-pass
-         * handling of mutable profiling facts and dependency watchers. */
-        if (length > 0 && has_profitable_candidates) {
-            length = optimize_uops(
-                tstate, buffer, trace_length, curr_stacklen, output,
-                dependencies, true, &plan, false);
-        }
-        else if (length > 0 && has_virtual_candidates) {
-            /* If every component lost the profitability test, generate the
-             * ordinary boxed trace directly.  This makes reject-all exactly
-             * equivalent to mode 0 instead of replaying a nominally virtual
-             * pass which happens not to select any producers. */
-            length = optimize_uops(
-                tstate, buffer, trace_length, curr_stacklen, output,
-                dependencies, false, NULL, false);
-        }
-    }
-    else {
-        length = optimize_uops(
-            tstate, buffer, trace_length, curr_stacklen, output, dependencies,
-            virtual_float_mode == VIRTUAL_FLOATS_OPTIMISTIC, NULL, false);
-    }
+    length = optimize_uops(
+        tstate, buffer, trace_length, curr_stacklen, output, dependencies,
+        enable_virtual_floats);
 
     if (length == OPTIMIZE_RETRY_WITHOUT_VIRTUALS) {
         /* The first pass is speculative.  Reinitialize every abstract arena
          * and regenerate the trace using CPython's ordinary boxed uops. */
-        assert(virtual_float_mode != VIRTUAL_FLOATS_DISABLED);
+        assert(enable_virtual_floats);
         length = optimize_uops(
             tstate, buffer, trace_length, curr_stacklen, output, dependencies,
-            false, NULL, false);
+            false);
     }
 
     if (length == 0) {

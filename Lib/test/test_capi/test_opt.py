@@ -4451,56 +4451,6 @@ class TestUopsOptimization(unittest.TestCase):
         sys.float_info.max_exp == 1024,
         "requires the virtual-float raw-double carrier",
     )
-    def test_float_raw_rhs_reuses_unique_box(self):
-        # Remainder is not virtualized, so it supplies a unique concrete float
-        # box. The product on the right is raw. Add/subtract should update the
-        # existing remainder box directly instead of materializing the product
-        # or discarding that box and allocating another one later.
-        def add(args):
-            a, b, c, d, n = args
-            result = [0.0]
-            for _ in range(n):
-                result[0] = (a % b) + (c * d)
-            return result[0]
-
-        def subtract(args):
-            a, b, c, d, n = args
-            result = [0.0]
-            for _ in range(n):
-                result[0] = (a % b) - (c * d)
-            return result[0]
-
-        def multiply(args):
-            a, b, c, d, n = args
-            result = [0.0]
-            for _ in range(n):
-                result[0] = (a % b) * (c * d)
-            return result[0]
-
-        args = (7.0, 3.0, 2.0, 5.0, TIER2_THRESHOLD)
-        for func, expected, expected_uop in (
-            (add, 11.0, "_BINARY_OP_ADD_FLOAT_INPLACE_BOXED_RAW"),
-            (subtract, -9.0,
-             "_BINARY_OP_SUBTRACT_FLOAT_INPLACE_BOXED_RAW"),
-            (multiply, 10.0,
-             "_BINARY_OP_MULTIPLY_FLOAT_INPLACE_BOXED_RAW"),
-        ):
-            with self.subTest(operation=func.__name__):
-                res, ex = self._run_with_optimizer(func, args)
-                self.assertEqual(res, expected)
-                self.assertIs(type(res), float)
-                self.assertIsNotNone(ex)
-                uops = get_opnames(ex)
-                self.assertIn(expected_uop, uops)
-                self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
-
-    @unittest.skipUnless(
-        sys.maxsize > 2**32 and
-        sys.float_info.radix == 2 and
-        sys.float_info.mant_dig == 53 and
-        sys.float_info.max_exp == 1024,
-        "requires the virtual-float raw-double carrier",
-    )
     def test_float_raw_rhs_does_not_mutate_list_owned_box(self):
         def testfunc(args):
             a, b, values, n = args
@@ -4996,59 +4946,6 @@ class TestUopsOptimization(unittest.TestCase):
             testfunc((2.0, 3.0, [0.0], 1))
         mixed = [0.0, object()]
         self.assertEqual(testfunc((2.0, 3.0, mixed, 1)), 6.0)
-
-    @unittest.skipUnless(
-        sys.maxsize > 2**32 and
-        sys.float_info.radix == 2 and
-        sys.float_info.mant_dig == 53 and
-        sys.float_info.max_exp == 1024,
-        "requires the virtual-float raw-double carrier",
-    )
-    def test_float_heuristic_rejects_equal_cost_component(self):
-        def testfunc(args):
-            a, b, box, n = args
-            for _ in range(n):
-                box["value"] = a * b
-            return box["value"]
-
-        box = {"value": 0.0}
-        res, ex = self._run_with_optimizer(
-            testfunc, (2.0, 3.0, box, TIER2_THRESHOLD),
-            virtual_mode="heuristic")
-        self.assertEqual(res, 6.0)
-        self.assertIsNotNone(ex)
-        uops = get_opnames(ex)
-        # One virtual producer followed by one mandatory box does not satisfy
-        # the strict virtual-operations > materializations threshold.
-        self.assertTrue(VIRTUAL_FLOAT_MULTIPLY_OPS.isdisjoint(uops))
-        self.assertNotIn("_MATERIALIZE_VIRTUAL_FLOAT", uops)
-        self.assertIn("_BINARY_OP_MULTIPLY_FLOAT", uops)
-
-    @unittest.skipUnless(
-        sys.maxsize > 2**32 and
-        sys.float_info.radix == 2 and
-        sys.float_info.mant_dig == 53 and
-        sys.float_info.max_exp == 1024,
-        "requires the virtual-float raw-double carrier",
-    )
-    def test_float_heuristic_keeps_profitable_component(self):
-        def testfunc(args):
-            a, b, box, n = args
-            for _ in range(n):
-                box["value"] = (a * b) + (a * b)
-            return box["value"]
-
-        box = {"value": 0.0}
-        res, ex = self._run_with_optimizer(
-            testfunc, (2.0, 3.0, box, TIER2_THRESHOLD),
-            virtual_mode="heuristic")
-        self.assertEqual(res, 12.0)
-        self.assertIsNotNone(ex)
-        # Three raw producers belong to one component with one final box, so
-        # the component is retained as 3 > 1.
-        self.assertEqual(count_virtual_float_multiplies(ex), 2)
-        self.assertEqual(count_virtual_float_adds(ex), 1)
-        self.assertEqual(count_ops(ex, "_MATERIALIZE_VIRTUAL_FLOAT"), 1)
 
     @unittest.skipUnless(
         sys.maxsize > 2**32 and
