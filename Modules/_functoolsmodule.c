@@ -31,6 +31,7 @@ typedef struct _functools_state {
     PyTypeObject *partial_type;
     PyTypeObject *keyobject_type;
     PyTypeObject *lru_list_elem_type;
+    PyTypeObject *clock_entry_type;
 } _functools_state;
 
 static inline _functools_state *
@@ -1082,6 +1083,312 @@ Fail:
     return NULL;
 }
 
+/* clock_cache object *********************************************************/
+
+struct clock_entry;
+struct clock_cache_object;
+
+typedef struct clock_entry {
+    PyObject_HEAD
+    PyObject* key;
+    PyObject* result;
+    Py_hash_t hash;
+    Py_ssize_t index;
+} clock_entry;
+
+static void
+clock_entry_dealloc(PyObject *op)
+{
+    clock_entry *entry = (clock_entry *)op;
+    PyTypeObject *type = Py_TYPE(entry);
+    Py_XDECREF(entry->key);
+    Py_XDECREF(entry->result);
+    type->tp_free(entry);
+    Py_DECREF(type);
+}
+
+static PyType_Slot clock_entry_type_slots[] = {
+    {Py_tp_dealloc, clock_entry_dealloc},
+    {0, 0}
+};
+
+static PyType_Spec clock_entry_type_spec = {
+    .name = "functools._clock_entry",
+    .basicsize = sizeof(clock_entry),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION |
+             Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = clock_entry_type_slots
+};
+
+typedef struct clock_cache_object {
+    PyObject_HEAD
+
+    Py_ssize_t capacity;
+    Py_ssize_t hand;
+
+    PyMutex mutex;
+    PyObject* dict;             // key -> clock_entry
+    clock_entry** cache;        // Fixed array of entry pointers
+    int* chances;               // Reference flags indexed by entry->index
+    PyObject* func;             // Wrapper python function
+    PyObject* kwd_mark;   // Marker separating positional, keyword args
+    int typed;
+} clock_cache_object;
+
+
+static PyObject* clock_cache_new(PyTypeObject* type, PyObject* args, PyObject* kwargs) {
+    PyObject* func;
+    PyObject* maxsize_0;
+    Py_ssize_t maxsize;
+    clock_cache_object* obj;
+    _functools_state* state;
+    int typed = 0;
+
+    // Parse keywords
+    static char* keywords[] = {"user_function", "maxsize", "typed", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|p:clock_cache", keywords, &func, &maxsize_0, &typed)) {
+        return NULL;
+    }
+
+    // Check and parse inputs
+    if (!PyCallable_Check(func)) {
+        // TODO: PyErr_SetString
+        return NULL;
+    }
+    if (maxsize_0 == Py_None) {
+        // TODO: Return error, clock must be bounded
+        return NULL;
+    }
+    maxsize = PyNumber_AsSsize_t(maxsize_0, PyExc_OverflowError);
+    if (maxsize == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (maxsize < 0) {
+        maxsize = 0;
+    }
+    state = get_functools_state_by_type(type);
+    if (state == NULL) {
+        return NULL;
+    }
+
+    // Construct cache
+    obj = (clock_cache_object*)type->tp_alloc(type, 0);
+    if (obj == NULL)
+        return NULL;
+    obj->func = Py_NewRef(func);
+    obj->typed = typed;
+    obj->kwd_mark = Py_NewRef(state->kwd_mark);
+    obj->capacity = maxsize;
+    obj->hand = 0;
+    obj->mutex = (PyMutex){0};
+    obj->dict = NULL;
+    obj->cache = NULL;
+    obj->chances = NULL;
+
+    // Construct sub objects
+    obj->dict = PyDict_New();
+    if (maxsize > 0) {
+        obj->cache = PyMem_Calloc((size_t)maxsize, sizeof(*obj->cache));
+        obj->chances = PyMem_Calloc((size_t)maxsize, sizeof(*obj->chances));
+    }
+    if (obj->dict == NULL ||
+        (maxsize > 0 && (obj->cache == NULL || obj->chances == NULL))) {
+        // TODO: Error handling
+        return NULL;
+    }
+
+    // Allocate entries
+    for (Py_ssize_t i = 0; i < maxsize; i++) {
+        clock_entry* entry = PyObject_New(clock_entry, state->clock_entry_type);
+        if (entry == NULL) {
+            // TODO: Error handling
+            return NULL;
+        }
+        entry->key = NULL;
+        entry->result = NULL;
+        entry->hash = 0;
+        entry->index = i;
+        obj->cache[i] = entry;
+    }
+    return (PyObject*)obj;
+}
+
+static void clock_cache_dealloc(PyObject* op) {
+    clock_cache_object* self = (clock_cache_object*)op;
+
+    Py_DECREF(self->dict);
+    Py_DECREF(self->func);
+    Py_DECREF(self->kwd_mark);
+
+    // Deallocate cache entries
+    for (Py_ssize_t i = 0; i < self->capacity; i++) {
+        Py_XDECREF(self->cache[i]);
+    }
+
+    PyMem_Free(self->cache);
+    PyMem_Free(self->chances);
+    PyTypeObject* type = Py_TYPE(self);
+    type->tp_free(self);
+    Py_DECREF(type);
+}
+
+
+static int clock_cache_get_lock_held(
+    clock_cache_object* self,
+    PyObject* key,
+    Py_hash_t hash,
+    PyObject** result
+) {
+    *result = NULL;
+
+    // Perform lookup
+    PyObject* value = NULL;
+    int status = _PyDict_GetItemRef_KnownHash((PyDictObject*)self->dict, key, hash, &value);
+
+    // Item is found
+    if (status == 1) {
+        clock_entry* entry = (clock_entry*)value;
+        self->chances[entry->index] = 1;
+        *result = Py_NewRef(entry->result);
+        Py_DECREF(value);
+    }
+    return status;
+}
+// 1: hit, 0: miss, -1: error
+
+
+static int clock_cache_put_lock_held(
+    clock_cache_object* self,
+    PyObject* key,
+    Py_hash_t hash,
+    PyObject* result,
+    PyObject** prev_key,
+    PyObject** prev_result
+) {
+
+    // Find next removal spot
+    while (self->chances[self->hand]) {
+        self->chances[self->hand] = 0;
+        self->hand = (self->hand + 1) % self->capacity;
+    }
+
+    // Create clock entry
+    clock_entry* entry = self->cache[self->hand];
+
+    // Remove victim
+    if (entry->key != NULL) {
+        int remove_status = _PyDict_DelItem_KnownHash(self->dict, entry->key, entry->hash);
+        if (remove_status < 0) {
+            // TODO: Error handling
+            return -1;
+        }
+    }
+
+    // Insert new entry
+    int status = _PyDict_SetItem_KnownHash(self->dict, key, (PyObject*)entry, hash);
+    if (status < 0) {
+        // TODO: Error handling
+        return -1;
+    }
+
+    // Keep new key and result
+    *prev_key = entry->key;
+    *prev_result = entry->result;
+    entry->key = Py_NewRef(key);
+    entry->result = Py_NewRef(result);
+    entry->hash = hash;
+    self->chances[self->hand] = 1;
+    self->hand = (self->hand + 1) % self->capacity;
+    return 0;
+}
+// 0: success, -1: error
+
+
+static PyObject* lru_cache_make_key(PyObject *kwd_mark, PyObject *args, PyObject *kwds, int typed);
+
+static PyObject* clock_cache_call(PyObject* op, PyObject* args, PyObject* kwargs) {
+    clock_cache_object* self = (clock_cache_object*)op;
+
+    if (self->capacity == 0) {
+        return PyObject_Call(self->func, args, kwargs);
+    }
+
+    PyObject* key = lru_cache_make_key(self->kwd_mark, args, kwargs, self->typed);
+    if (key == NULL) return NULL;
+    Py_hash_t hash = PyObject_Hash(key);
+    if (hash == -1) {
+        Py_DECREF(key);
+        return NULL;
+    }
+
+    // Query cache
+    PyMutex_Lock(&self->mutex);
+    PyObject* cached_result = NULL;
+    int status = clock_cache_get_lock_held(self, key, hash, &cached_result);
+    PyMutex_Unlock(&self->mutex);
+    if (status == 1) {
+        Py_DECREF(key);
+        return cached_result;
+    }
+    if (status == -1) {
+        // TODO: Error handling
+        Py_DECREF(key);
+        return NULL;
+    }
+
+    // Compute result
+    PyObject* result = PyObject_Call(self->func, args, kwargs);
+    if (result == NULL) {
+        // TODO: Error Handling
+        Py_DECREF(key);
+        return NULL;
+    }
+
+    // Store in cache
+    PyObject* prev_key = NULL;
+    PyObject* prev_result = NULL;
+    PyMutex_Lock(&self->mutex);
+    status = clock_cache_get_lock_held(self, key, hash, &cached_result);
+    if (status == 1) {
+        // Second lookup hit but return computed result
+        PyMutex_Unlock(&self->mutex);
+        Py_DECREF(cached_result);
+        Py_DECREF(key);
+        return result;
+    }
+    if (status == -1) {
+        PyMutex_Unlock(&self->mutex);
+        Py_DECREF(result);
+        Py_DECREF(key);
+        return NULL;
+    }
+
+    int set_status = clock_cache_put_lock_held(self, key, hash, result, &prev_key, &prev_result);
+    PyMutex_Unlock(&self->mutex);
+    Py_DECREF(key);
+    if (set_status == -1) {
+        // TODO: Error handling
+    }
+    Py_XDECREF(prev_key);
+    Py_XDECREF(prev_result);
+    return result;
+}
+
+static PyType_Slot clock_cache_type_slots[] = {
+    {Py_tp_new, clock_cache_new},
+    {Py_tp_call, clock_cache_call},
+    {Py_tp_dealloc, clock_cache_dealloc},
+    {0, NULL}
+};
+
+static PyType_Spec clock_cache_type_spec = {
+    .name = "functools._clock_cache_wrapper",
+    .basicsize = sizeof(clock_cache_object),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = clock_cache_type_slots
+};
+
+
 /* lru_cache object **********************************************************/
 
 /* There are four principal algorithmic differences from the pure python version:
@@ -1924,6 +2231,21 @@ _functools_exec(PyObject *module)
     // lru_list_elem is used only in _lru_cache_wrapper.
     // So we don't expose it in module namespace.
 
+    PyObject* clock_cache_type = PyType_FromModuleAndSpec(module, &clock_cache_type_spec, NULL);
+    if (clock_cache_type == NULL)
+        return -1;
+    if (PyModule_AddType(module, (PyTypeObject*)clock_cache_type) < 0) {
+        Py_DECREF(clock_cache_type);
+        return -1;
+    }
+    Py_DECREF(clock_cache_type);
+
+    state->clock_entry_type = (PyTypeObject *)PyType_FromModuleAndSpec(
+        module, &clock_entry_type_spec, NULL);
+    if (state->clock_entry_type == NULL) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1936,6 +2258,7 @@ _functools_traverse(PyObject *module, visitproc visit, void *arg)
     Py_VISIT(state->partial_type);
     Py_VISIT(state->keyobject_type);
     Py_VISIT(state->lru_list_elem_type);
+    Py_VISIT(state->clock_entry_type);
     return 0;
 }
 
@@ -1948,6 +2271,7 @@ _functools_clear(PyObject *module)
     Py_CLEAR(state->partial_type);
     Py_CLEAR(state->keyobject_type);
     Py_CLEAR(state->lru_list_elem_type);
+    Py_CLEAR(state->clock_entry_type);
     return 0;
 }
 

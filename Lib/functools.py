@@ -10,7 +10,7 @@
 # See C source code for _functools credits/copyright
 
 __all__ = ['update_wrapper', 'wraps', 'WRAPPER_ASSIGNMENTS', 'WRAPPER_UPDATES',
-           'total_ordering', 'cache', 'cmp_to_key', 'lru_cache', 'reduce',
+           'total_ordering', 'cache', 'cmp_to_key', 'clock_cache', 'lru_cache', 'reduce',
            'partial', 'partialmethod', 'singledispatch', 'singledispatchmethod',
            'cached_property', 'Placeholder']
 
@@ -494,6 +494,15 @@ def _unwrap_partialmethod(func):
             func = getattr(func, 'func')
         func = _unwrap_partial(func)
     return func
+
+### Clock Cache
+
+from _functools import _clock_cache_wrapper
+
+def clock_cache(maxsize=128, typed=False):
+    def decorating_function(user_function):
+        return _clock_cache_wrapper(user_function, maxsize, typed)
+    return decorating_function
 
 ################################################################################
 ### LRU Cache function decorator
