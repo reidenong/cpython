@@ -1093,7 +1093,7 @@ typedef struct clock_entry {
     PyObject* key;
     PyObject* result;
     Py_hash_t hash;
-    Py_ssize_t index;
+    unsigned char referenced;
 } clock_entry;
 
 static void
@@ -1126,10 +1126,8 @@ typedef struct clock_cache_object {
     Py_ssize_t capacity;
     Py_ssize_t hand;
 
-    PyMutex mutex;
     PyObject* dict;             // key -> clock_entry
     clock_entry** cache;        // Fixed array of entry pointers
-    int* chances;               // Reference flags indexed by entry->index
     PyObject* func;             // Wrapper python function
     PyObject* kwd_mark;   // Marker separating positional, keyword args
     int typed;
@@ -1180,19 +1178,16 @@ static PyObject* clock_cache_new(PyTypeObject* type, PyObject* args, PyObject* k
     obj->kwd_mark = Py_NewRef(state->kwd_mark);
     obj->capacity = maxsize;
     obj->hand = 0;
-    obj->mutex = (PyMutex){0};
     obj->dict = NULL;
     obj->cache = NULL;
-    obj->chances = NULL;
 
     // Construct sub objects
-    obj->dict = PyDict_New();
+    obj->dict = _PyDict_NewPresized(maxsize);
     if (maxsize > 0) {
         obj->cache = PyMem_Calloc((size_t)maxsize, sizeof(*obj->cache));
-        obj->chances = PyMem_Calloc((size_t)maxsize, sizeof(*obj->chances));
     }
     if (obj->dict == NULL ||
-        (maxsize > 0 && (obj->cache == NULL || obj->chances == NULL))) {
+        (maxsize > 0 && obj->cache == NULL)) {
         // TODO: Error handling
         return NULL;
     }
@@ -1207,7 +1202,7 @@ static PyObject* clock_cache_new(PyTypeObject* type, PyObject* args, PyObject* k
         entry->key = NULL;
         entry->result = NULL;
         entry->hash = 0;
-        entry->index = i;
+        entry->referenced = 0;
         obj->cache[i] = entry;
     }
     return (PyObject*)obj;
@@ -1226,7 +1221,6 @@ static void clock_cache_dealloc(PyObject* op) {
     }
 
     PyMem_Free(self->cache);
-    PyMem_Free(self->chances);
     PyTypeObject* type = Py_TYPE(self);
     type->tp_free(self);
     Py_DECREF(type);
@@ -1239,20 +1233,23 @@ static int clock_cache_get_lock_held(
     Py_hash_t hash,
     PyObject** result
 ) {
+    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
     *result = NULL;
 
     // Perform lookup
     PyObject* value = NULL;
-    int status = _PyDict_GetItemRef_KnownHash((PyDictObject*)self->dict, key, hash, &value);
+    Py_ssize_t found = _Py_dict_lookup((PyDictObject*)self->dict, key, hash, &value);
+    if (found == DKIX_ERROR) return -1;
 
     // Item is found
-    if (status == 1) {
+    if (value != NULL) {
+        // The fixed pool owns the entry; only the result needs a new reference.
         clock_entry* entry = (clock_entry*)value;
-        self->chances[entry->index] = 1;
+        entry->referenced = 1;
         *result = Py_NewRef(entry->result);
-        Py_DECREF(value);
+        return 1;
     }
-    return status;
+    return 0;
 }
 // 1: hit, 0: miss, -1: error
 
@@ -1265,10 +1262,11 @@ static int clock_cache_put_lock_held(
     PyObject** prev_key,
     PyObject** prev_result
 ) {
+    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
 
     // Find next removal spot
-    while (self->chances[self->hand]) {
-        self->chances[self->hand] = 0;
+    while (self->cache[self->hand]->referenced) {
+        self->cache[self->hand]->referenced = 0;
         self->hand = (self->hand + 1) % self->capacity;
     }
 
@@ -1297,7 +1295,7 @@ static int clock_cache_put_lock_held(
     entry->key = Py_NewRef(key);
     entry->result = Py_NewRef(result);
     entry->hash = hash;
-    self->chances[self->hand] = 1;
+    entry->referenced = 1;
     self->hand = (self->hand + 1) % self->capacity;
     return 0;
 }
@@ -1322,10 +1320,11 @@ static PyObject* clock_cache_call(PyObject* op, PyObject* args, PyObject* kwargs
     }
 
     // Query cache
-    PyMutex_Lock(&self->mutex);
     PyObject* cached_result = NULL;
-    int status = clock_cache_get_lock_held(self, key, hash, &cached_result);
-    PyMutex_Unlock(&self->mutex);
+    int status;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    status = clock_cache_get_lock_held(self, key, hash, &cached_result);
+    Py_END_CRITICAL_SECTION();
     if (status == 1) {
         Py_DECREF(key);
         return cached_result;
@@ -1347,24 +1346,25 @@ static PyObject* clock_cache_call(PyObject* op, PyObject* args, PyObject* kwargs
     // Store in cache
     PyObject* prev_key = NULL;
     PyObject* prev_result = NULL;
-    PyMutex_Lock(&self->mutex);
+    int set_status = 0;
+    Py_BEGIN_CRITICAL_SECTION(self);
     status = clock_cache_get_lock_held(self, key, hash, &cached_result);
+    if (status == 0) {
+        set_status = clock_cache_put_lock_held(self, key, hash, result, &prev_key, &prev_result);
+    }
+    Py_END_CRITICAL_SECTION();
     if (status == 1) {
         // Second lookup hit but return computed result
-        PyMutex_Unlock(&self->mutex);
         Py_DECREF(cached_result);
         Py_DECREF(key);
         return result;
     }
     if (status == -1) {
-        PyMutex_Unlock(&self->mutex);
         Py_DECREF(result);
         Py_DECREF(key);
         return NULL;
     }
 
-    int set_status = clock_cache_put_lock_held(self, key, hash, result, &prev_key, &prev_result);
-    PyMutex_Unlock(&self->mutex);
     Py_DECREF(key);
     if (set_status == -1) {
         // TODO: Error handling
