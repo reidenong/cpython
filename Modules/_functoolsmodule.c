@@ -1,6 +1,7 @@
 #include "Python.h"
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_dict.h"          // _PyDict_Pop_KnownHash()
+#include "pycore_lock.h"          // _PyRWMutex
 #include "pycore_long.h"          // _PyLong_GetZero()
 #include "pycore_moduleobject.h"  // _PyModule_GetState()
 #include "pycore_object.h"        // _PyObject_GC_TRACK
@@ -1125,11 +1126,12 @@ typedef struct clock_cache_object {
 
     Py_ssize_t capacity;
     Py_ssize_t hand;
+    _PyRWMutex mutex;
 
     PyObject* dict;             // key -> clock_entry
     clock_entry** cache;        // Fixed array of entry pointers
     PyObject* func;             // Wrapper python function
-    PyObject* kwd_mark;   // Marker separating positional, keyword args
+    PyObject* kwd_mark;         // Marker separating positional, keyword args
     int typed;
 } clock_cache_object;
 
@@ -1178,6 +1180,7 @@ static PyObject* clock_cache_new(PyTypeObject* type, PyObject* args, PyObject* k
     obj->kwd_mark = Py_NewRef(state->kwd_mark);
     obj->capacity = maxsize;
     obj->hand = 0;
+    obj->mutex = (_PyRWMutex){0};
     obj->dict = NULL;
     obj->cache = NULL;
 
@@ -1227,13 +1230,12 @@ static void clock_cache_dealloc(PyObject* op) {
 }
 
 
-static int clock_cache_get_lock_held(
+static int clock_cache_get_readlock_held(
     clock_cache_object* self,
     PyObject* key,
     Py_hash_t hash,
     PyObject** result
 ) {
-    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
     *result = NULL;
 
     // Perform lookup
@@ -1245,7 +1247,7 @@ static int clock_cache_get_lock_held(
     if (value != NULL) {
         // The fixed pool owns the entry; only the result needs a new reference.
         clock_entry* entry = (clock_entry*)value;
-        entry->referenced = 1;
+        _Py_atomic_store_uint8_relaxed(&entry->referenced, 1);
         *result = Py_NewRef(entry->result);
         return 1;
     }
@@ -1254,7 +1256,7 @@ static int clock_cache_get_lock_held(
 // 1: hit, 0: miss, -1: error
 
 
-static int clock_cache_put_lock_held(
+static int clock_cache_put_writelock_held(
     clock_cache_object* self,
     PyObject* key,
     Py_hash_t hash,
@@ -1262,11 +1264,10 @@ static int clock_cache_put_lock_held(
     PyObject** prev_key,
     PyObject** prev_result
 ) {
-    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
 
     // Find next removal spot
-    while (self->cache[self->hand]->referenced) {
-        self->cache[self->hand]->referenced = 0;
+    while (_Py_atomic_load_uint8_relaxed(&self->cache[self->hand]->referenced)) {
+        _Py_atomic_store_uint8_relaxed(&self->cache[self->hand]->referenced, 0);
         self->hand = (self->hand + 1) % self->capacity;
     }
 
@@ -1295,7 +1296,7 @@ static int clock_cache_put_lock_held(
     entry->key = Py_NewRef(key);
     entry->result = Py_NewRef(result);
     entry->hash = hash;
-    entry->referenced = 1;
+    _Py_atomic_store_uint8_relaxed(&entry->referenced, 1);
     self->hand = (self->hand + 1) % self->capacity;
     return 0;
 }
@@ -1319,12 +1320,14 @@ static PyObject* clock_cache_call(PyObject* op, PyObject* args, PyObject* kwargs
         return NULL;
     }
 
+    // Assume key comparisons (__eq__) do not reenter this cache, even indirectly.
+    // Reentrancy while holding the non-reentrant RW lock can deadlock.
     // Query cache
     PyObject* cached_result = NULL;
     int status;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    status = clock_cache_get_lock_held(self, key, hash, &cached_result);
-    Py_END_CRITICAL_SECTION();
+    _PyRWMutex_RLock(&self->mutex);
+    status = clock_cache_get_readlock_held(self, key, hash, &cached_result);
+    _PyRWMutex_RUnlock(&self->mutex);
     if (status == 1) {
         Py_DECREF(key);
         return cached_result;
@@ -1347,12 +1350,12 @@ static PyObject* clock_cache_call(PyObject* op, PyObject* args, PyObject* kwargs
     PyObject* prev_key = NULL;
     PyObject* prev_result = NULL;
     int set_status = 0;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    status = clock_cache_get_lock_held(self, key, hash, &cached_result);
+    _PyRWMutex_Lock(&self->mutex);
+    status = clock_cache_get_readlock_held(self, key, hash, &cached_result);
     if (status == 0) {
-        set_status = clock_cache_put_lock_held(self, key, hash, result, &prev_key, &prev_result);
+        set_status = clock_cache_put_writelock_held(self, key, hash, result, &prev_key, &prev_result);
     }
-    Py_END_CRITICAL_SECTION();
+    _PyRWMutex_Unlock(&self->mutex);
     if (status == 1) {
         // Second lookup hit but return computed result
         Py_DECREF(cached_result);

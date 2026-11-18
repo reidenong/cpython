@@ -497,9 +497,9 @@ def _unwrap_partialmethod(func):
 
 ### Clock Cache
 
-from _functools import _clock_cache_wrapper
-
 def clock_cache(maxsize=128, typed=False):
+    from _functools import _clock_cache_wrapper
+
     def decorating_function(user_function):
         return _clock_cache_wrapper(user_function, maxsize, typed)
     return decorating_function
